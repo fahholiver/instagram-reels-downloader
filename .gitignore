@@ -1,0 +1,7 @@
+# Pastas temporárias e arquivos gerados localmente
+downloads/
+*.zip
+*.txt
+__pycache__/
+.env
+.streamlit/secrets.toml
