@@ -3,6 +3,7 @@ import apify_client
 import requests
 import zipfile
 import io
+from supabase import create_client
 
 # Configuração da página
 st.set_page_config(
@@ -11,10 +12,89 @@ st.set_page_config(
     layout="centered"
 )
 
+# -----------------------------------------------------------------------------
+# CONEXÃO E AUTENTICAÇÃO COM SUPABASE
+# -----------------------------------------------------------------------------
+@st.cache_resource
+def init_supabase():
+    try:
+        url = st.secrets["SUPABASE_URL"]
+        key = st.secrets["SUPABASE_KEY"]
+        return create_client(url, key)
+    except Exception as e:
+        st.error("⚠️ Configuração do Supabase ausente nos Secrets.")
+        return None
+
+supabase = init_supabase()
+
+# Gerenciamento de sessão
+if "user" not in st.session_state:
+    st.session_state["user"] = None
+
+# TELA DE LOGIN / REGISTRO
+if st.session_state["user"] is None:
+    st.title("🔒 Login - Instagram Reels Downloader")
+    
+    tab1, tab2 = st.tabs(["Entrar", "Criar Conta"])
+    
+    with tab1:
+        st.subheader("Acessar sua conta")
+        login_email = st.text_input("E-mail", key="login_email")
+        login_password = st.text_input("Senha", type="password", key="login_password")
+        
+        if st.button("Entrar"):
+            if not login_email or not login_password:
+                st.warning("Preencha todos os campos.")
+            elif supabase:
+                try:
+                    res = supabase.auth.sign_in_with_password({
+                        "email": login_email.strip(),
+                        "password": login_password.strip()
+                    })
+                    if res.user:
+                        st.session_state["user"] = res.user
+                        st.success("Login realizado com sucesso!")
+                        st.rerun()
+                except Exception as e:
+                    st.error(f"Erro no login: {e}")
+
+    with tab2:
+        st.subheader("Criar nova conta")
+        signup_email = st.text_input("E-mail", key="signup_email")
+        signup_password = st.text_input("Senha", type="password", key="signup_password")
+        
+        if st.button("Cadastrar"):
+            if not signup_email or not signup_password:
+                st.warning("Preencha todos os campos.")
+            elif supabase:
+                try:
+                    res = supabase.auth.sign_up({
+                        "email": signup_email.strip(),
+                        "password": signup_password.strip()
+                    })
+                    if res.user:
+                        st.success("Conta criada com sucesso! Faça login para continuar.")
+                except Exception as e:
+                    st.error(f"Erro ao cadastrar: {e}")
+
+    st.stop()
+
+# -----------------------------------------------------------------------------
+# PAINEL PRINCIPAL (APÓS LOGIN)
+# -----------------------------------------------------------------------------
+# Barra lateral para controle de usuário e logout
+with st.sidebar:
+    st.write(f"👤 Logado como: **{st.session_state['user'].email}**")
+    if st.button("Sair (Logout)"):
+        if supabase:
+            supabase.auth.sign_out()
+        st.session_state["user"] = None
+        st.rerun()
+
 st.title("📥 Instagram Reels Downloader")
 st.write("Digite o @ do perfil do Instagram para baixar os vídeos em lote em um arquivo ZIP.")
 
-# Tenta carregar o Token do Apify a partir dos Secrets do Streamlit
+# Carrega o Token do Apify
 try:
     APIFY_TOKEN = st.secrets["APIFY_TOKEN"]
 except Exception:
@@ -60,11 +140,9 @@ if submit_button:
                 else:
                     st.success(f"Encontrados {len(video_urls)} vídeos! Baixando e compactando...")
                     
-                    # Barra de progresso do download
                     progress_bar = st.progress(0)
-                    
-                    # Cria o arquivo ZIP em memória
                     zip_buffer = io.BytesIO()
+                    
                     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
                         headers = {
                             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
@@ -85,7 +163,6 @@ if submit_button:
                     
                     st.success("ZIP gerado com sucesso!")
                     
-                    # Botão nativo do Streamlit para baixar o arquivo no computador ou celular
                     st.download_button(
                         label="💾 Baixar todos os vídeos (.ZIP)",
                         data=zip_buffer,
@@ -93,7 +170,6 @@ if submit_button:
                         mime="application/zip"
                     )
 
-                    # Exibe também as prévias dos vídeos na tela
                     st.write("---")
                     st.subheader("Pré-visualização dos vídeos:")
                     for idx, url in enumerate(video_urls, 1):
