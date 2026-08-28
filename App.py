@@ -13,10 +13,21 @@ st.set_page_config(
 )
 
 # -----------------------------------------------------------------------------
-# CONEXÃO E AUTENTICAÇÃO COM SUPABASE (COM TIMEOUT AUMENTADO)
+# CONEXÃO E AUTENTICAÇÃO COM SUPABASE (DIAGNÓSTICO DE SECRETS + TIMEOUT)
 # -----------------------------------------------------------------------------
 @st.cache_resource
 def init_supabase():
+    # Diagnóstico para apontar exatamente qual chave falta no Streamlit Cloud
+    missing_keys = []
+    if "SUPABASE_URL" not in st.secrets:
+        missing_keys.append("SUPABASE_URL")
+    if "SUPABASE_KEY" not in st.secrets:
+        missing_keys.append("SUPABASE_KEY")
+        
+    if missing_keys:
+        st.error(f"⚠️ As seguintes chaves estão faltando nos Secrets do Streamlit: {', '.join(missing_keys)}")
+        return None
+
     try:
         url = st.secrets["SUPABASE_URL"]
         key = st.secrets["SUPABASE_KEY"]
@@ -26,7 +37,7 @@ def init_supabase():
         
         return create_client(url, key, options=options)
     except Exception as e:
-        st.error("⚠️ Configuração do Supabase ausente nos Secrets.")
+        st.error(f"⚠️ Erro ao inicializar o cliente do Supabase: {e}")
         return None
 
 supabase = init_supabase()
@@ -101,11 +112,11 @@ st.title("📥 Instagram Reels Downloader")
 st.write("Digite o @ do perfil do Instagram para baixar os vídeos em lote em um arquivo ZIP.")
 
 # Carrega o Token do Apify a partir dos Secrets
-try:
-    APIFY_TOKEN = st.secrets["APIFY_TOKEN"]
-except Exception:
-    st.error("⚠️ Token do Apify não configurado nos Secrets do Streamlit.")
+if "APIFY_TOKEN" not in st.secrets:
+    st.error("⚠️ A chave APIFY_TOKEN não foi configurada nos Secrets do Streamlit.")
     st.stop()
+
+APIFY_TOKEN = st.secrets["APIFY_TOKEN"]
 
 # Formulário de Download
 with st.form("downloader_form"):
