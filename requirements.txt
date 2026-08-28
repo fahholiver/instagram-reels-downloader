@@ -1,0 +1,5 @@
+streamlit
+requests
+yt-dlp
+supabase
+stripe
