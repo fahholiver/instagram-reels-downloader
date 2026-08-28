@@ -3,7 +3,7 @@ import apify_client
 import requests
 import zipfile
 import io
-from supabase import create_client
+from supabase import create_client, ClientOptions
 
 # Configuração da página
 st.set_page_config(
@@ -13,21 +13,25 @@ st.set_page_config(
 )
 
 # -----------------------------------------------------------------------------
-# CONEXÃO E AUTENTICAÇÃO COM SUPABASE
+# CONEXÃO E AUTENTICAÇÃO COM SUPABASE (COM TIMEOUT AUMENTADO)
 # -----------------------------------------------------------------------------
 @st.cache_resource
 def init_supabase():
     try:
         url = st.secrets["SUPABASE_URL"]
         key = st.secrets["SUPABASE_KEY"]
-        return create_client(url, key)
+        
+        # Aumenta o tempo limite de resposta da API do Supabase para evitar 'read operation timed out'
+        options = ClientOptions(post_grest_timeout=30)
+        
+        return create_client(url, key, options=options)
     except Exception as e:
         st.error("⚠️ Configuração do Supabase ausente nos Secrets.")
         return None
 
 supabase = init_supabase()
 
-# Gerenciamento de sessão
+# Gerenciamento de sessão do usuário
 if "user" not in st.session_state:
     st.session_state["user"] = None
 
@@ -82,19 +86,21 @@ if st.session_state["user"] is None:
 # -----------------------------------------------------------------------------
 # PAINEL PRINCIPAL (APÓS LOGIN)
 # -----------------------------------------------------------------------------
-# Barra lateral para controle de usuário e logout
 with st.sidebar:
     st.write(f"👤 Logado como: **{st.session_state['user'].email}**")
     if st.button("Sair (Logout)"):
         if supabase:
-            supabase.auth.sign_out()
+            try:
+                supabase.auth.sign_out()
+            except Exception:
+                pass
         st.session_state["user"] = None
         st.rerun()
 
 st.title("📥 Instagram Reels Downloader")
 st.write("Digite o @ do perfil do Instagram para baixar os vídeos em lote em um arquivo ZIP.")
 
-# Carrega o Token do Apify
+# Carrega o Token do Apify a partir dos Secrets
 try:
     APIFY_TOKEN = st.secrets["APIFY_TOKEN"]
 except Exception:
