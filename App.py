@@ -1,7 +1,5 @@
 import streamlit as st
 import apify_client
-import zipfile
-import io
 
 # Configuração da página
 st.set_page_config(
@@ -38,20 +36,23 @@ if submit_button:
                 # Inicializa o cliente do Apify
                 client = apify_client.ApifyClient(APIFY_TOKEN)
                 
-                # Executa o Actor do Apify para buscar as postagens do perfil
+                # Parâmetros de execução do Actor
                 run_input = {
                     "directUrls": [f"https://www.instagram.com/{clean_username}/"],
                     "resultsType": "posts",
                     "resultsLimit": count,
                 }
                 
-                # Chamada para o scraper do Instagram no Apify
+                # Executa o Actor do Apify
                 run = client.actor("apify/instagram-scraper").call(run_input=run_input)
-                dataset_items = client.dataset(run["defaultDatasetId"]).list_items().items
+                
+                # Acesso corrigido usando notação de objeto (.default_dataset_id)
+                dataset_id = run.get("defaultDatasetId") if isinstance(run, dict) else run.default_dataset_id
+                dataset_items = client.dataset(dataset_id).list_items().items
 
                 video_urls = []
                 for item in dataset_items:
-                    # Filtra apenas postagens que são vídeos/Reels
+                    # Filtra apenas postagens que possuem URL de vídeo
                     if item.get("isVideo") and item.get("videoUrl"):
                         video_urls.append(item.get("videoUrl"))
                     elif item.get("type") == "Video" and item.get("videoUrl"):
@@ -62,7 +63,7 @@ if submit_button:
                 else:
                     st.success(f"Encontrados {len(video_urls)} vídeos!")
                     
-                    # Exibe os links e botões de pré-visualização/download
+                    # Exibe os links e tocadores de vídeo
                     for idx, url in enumerate(video_urls, 1):
                         st.write(f"**Vídeo {idx}**")
                         st.video(url)
