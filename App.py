@@ -13,11 +13,10 @@ st.set_page_config(
 )
 
 # -----------------------------------------------------------------------------
-# CONEXÃO E AUTENTICAÇÃO COM SUPABASE (DIAGNÓSTICO DE SECRETS + TIMEOUT)
+# CONEXÃO E AUTENTICAÇÃO COM SUPABASE
 # -----------------------------------------------------------------------------
 @st.cache_resource
 def init_supabase():
-    # Diagnóstico para apontar exatamente qual chave falta no Streamlit Cloud
     missing_keys = []
     if "SUPABASE_URL" not in st.secrets:
         missing_keys.append("SUPABASE_URL")
@@ -32,8 +31,8 @@ def init_supabase():
         url = st.secrets["SUPABASE_URL"]
         key = st.secrets["SUPABASE_KEY"]
         
-        # Aumenta o tempo limite de resposta da API do Supabase para evitar 'read operation timed out'
-        options = ClientOptions(post_grest_timeout=30)
+        # Parâmetro corrigido para versões recentes da biblioteca supabase (postgrest_client_timeout)
+        options = ClientOptions(postgrest_client_timeout=30)
         
         return create_client(url, key, options=options)
     except Exception as e:
