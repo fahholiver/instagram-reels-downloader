@@ -30,7 +30,7 @@ CANVAS_HEIGHT = HEADER_HEIGHT + BOX_TOP_MARGIN + BOX_HEIGHT + BOX_BOTTOM_MARGIN
 # Com os valores acima o canvas fica 1080x1920 (proporção 9:16, padrão Reels)
 
 AVATAR_SIZE = 110
-AVATAR_MARGIN_LEFT = 40
+AVATAR_MARGIN_LEFT = 80
 AVATAR_MARGIN_TOP = 300       # header mais para baixo (era 55)
 
 BOX_SIDE_MARGIN = 40        # margem branca nas laterais da caixa do vídeo (mesma do avatar)
