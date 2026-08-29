@@ -11,6 +11,12 @@ import textwrap
 from supabase import create_client, ClientOptions
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
+try:
+    from streamlit_cropper import st_cropper
+    CROPPER_AVAILABLE = True
+except ImportError:
+    CROPPER_AVAILABLE = False
+
 # Configuração da página
 st.set_page_config(
     page_title="Instagram Reels Downloader",
@@ -53,9 +59,15 @@ def load_font(path, size):
         return ImageFont.load_default()
 
 
-def make_circular_avatar(image_bytes, size):
-    """Recorta a foto de perfil em um círculo, sem distorcer."""
-    img = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
+def make_circular_avatar(image_data, size):
+    """
+    Recorta a foto de perfil em um círculo, sem distorcer.
+    Aceita tanto bytes quanto um objeto PIL.Image (já recortado pelo cropper).
+    """
+    if isinstance(image_data, Image.Image):
+        img = image_data.convert("RGBA")
+    else:
+        img = Image.open(io.BytesIO(image_data)).convert("RGBA")
     img = ImageOps.fit(img, (size, size), Image.LANCZOS)
     mask = Image.new("L", (size, size), 0)
     mdraw = ImageDraw.Draw(mask)
@@ -286,7 +298,7 @@ with st.sidebar:
         st.rerun()
 
 st.title("📥 Instagram Reels Downloader")
-st.write("Digite o @ do perfil do Instagram para baixar os vídeos em lote, já dentro do seu template, em um arquivo ZIP.")
+st.write("Monte seu template, veja a prévia, depois busque os Reels e baixe tudo já pronto em um ZIP.")
 
 # Verifica se o FFmpeg está disponível no ambiente
 if shutil.which("ffmpeg") is None:
@@ -296,6 +308,68 @@ if shutil.which("ffmpeg") is None:
         "(e reinicie o app) para que a montagem do template funcione."
     )
 
+if not CROPPER_AVAILABLE:
+    st.warning(
+        "⚠️ A biblioteca `streamlit-cropper` não está instalada — a foto será "
+        "apenas centralizada e recortada automaticamente, sem controle manual "
+        "de recorte/zoom. Adicione `streamlit-cropper` ao `requirements.txt` "
+        "para habilitar o ajuste manual."
+    )
+
+# -----------------------------------------------------------------------------
+# ETAPA 1 — MONTAR E PRÉ-VISUALIZAR O TEMPLATE
+# -----------------------------------------------------------------------------
+st.header("1️⃣ Monte seu template")
+
+avatar_file = st.file_uploader("Foto de perfil (opcional):", type=["png", "jpg", "jpeg"], key="avatar_uploader")
+
+avatar_data = None
+if avatar_file is not None:
+    original_img = Image.open(avatar_file).convert("RGB")
+
+    if CROPPER_AVAILABLE:
+        st.caption("Arraste as bordas do quadro azul para recortar/ampliar a foto — o miolo selecionado é o que vira o avatar circular:")
+        avatar_data = st_cropper(
+            original_img,
+            realtime_update=True,
+            box_color="#3b82f6",
+            aspect_ratio=(1, 1),
+            return_type="image",
+            key="avatar_cropper",
+        )
+    else:
+        avatar_data = original_img
+
+col1, col2 = st.columns(2)
+with col1:
+    display_name = st.text_input("Nome a exibir no template:", placeholder="ex: Usuário Aqui", key="tpl_name")
+    verified = st.checkbox("Mostrar selo de verificado", value=False, key="tpl_verified")
+with col2:
+    display_handle = st.text_input("Usuário a exibir (sem @):", placeholder="ex: arrobaaqui", key="tpl_handle")
+
+caption = st.text_input("Texto extra abaixo do @ (opcional):", placeholder="ex: Confira esse vídeo!", key="tpl_caption")
+
+template_name = display_name.strip() if display_name.strip() else "Usuário Aqui"
+template_handle = display_handle.strip().replace("@", "") if display_handle.strip() else "arrobaaqui"
+
+bg_path, box_x, box_y, box_w, box_h = build_background_canvas(
+    avatar_data,
+    template_name,
+    template_handle,
+    verified,
+    caption.strip() if caption else "",
+)
+
+st.subheader("Prévia do template")
+st.image(bg_path, caption="A área branca abaixo do header é o limite onde o vídeo vai entrar", width=320)
+
+st.markdown("---")
+
+# -----------------------------------------------------------------------------
+# ETAPA 2 — BUSCAR VÍDEOS E BAIXAR
+# -----------------------------------------------------------------------------
+st.header("2️⃣ Buscar vídeos e baixar")
+
 # Carrega o Token do Apify a partir dos Secrets
 if "APIFY_TOKEN" not in st.secrets:
     st.error("⚠️ A chave APIFY_TOKEN não foi configurada nos Secrets do Streamlit.")
@@ -303,19 +377,9 @@ if "APIFY_TOKEN" not in st.secrets:
 
 APIFY_TOKEN = st.secrets["APIFY_TOKEN"]
 
-# Formulário de Download
 with st.form("downloader_form"):
     username = st.text_input("Perfil do Instagram (sem @) — usado para buscar os vídeos:", placeholder="ex: instagram")
     count = st.number_input("Quantidade de vídeos para buscar:", min_value=1, max_value=20, value=3)
-
-    st.markdown("---")
-    st.markdown("**Dados do template** (preenchidos manualmente, não vêm da busca)")
-    avatar_file = st.file_uploader("Foto de perfil para o template (opcional):", type=["png", "jpg", "jpeg"])
-    display_name = st.text_input("Nome a exibir no template:", placeholder="ex: Usuário Aqui")
-    display_handle = st.text_input("Usuário a exibir (sem @):", placeholder="ex: arrobaaqui")
-    verified = st.checkbox("Mostrar selo de verificado", value=False)
-    caption = st.text_input("Texto extra abaixo do @ (opcional):", placeholder="ex: Confira esse vídeo!")
-
     submit_button = st.form_submit_button("Buscar e Baixar Reels (ZIP)")
 
 if submit_button:
@@ -326,11 +390,6 @@ if submit_button:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         }
-
-        # Dados do template vêm direto do formulário (sem busca no Apify)
-        avatar_bytes = avatar_file.read() if avatar_file is not None else None
-        template_name = display_name.strip() if display_name and display_name.strip() else clean_username
-        template_handle = (display_handle.strip().replace("@", "") if display_handle and display_handle.strip() else clean_username)
 
         with st.spinner(f"Buscando Reels de @{clean_username}..."):
             try:
@@ -356,18 +415,9 @@ if submit_button:
                 if not video_urls:
                     st.error("Nenhum vídeo/Reel público encontrado para este perfil.")
                 else:
-                    st.success(f"Encontrados {len(video_urls)} vídeos! Montando template e compactando...")
+                    st.success(f"Encontrados {len(video_urls)} vídeos! Aplicando o template e compactando...")
 
-                    # Monta o fundo (avatar + nome + @ + caixa) uma única vez
-                    bg_path, box_x, box_y, box_w, box_h = build_background_canvas(
-                        avatar_bytes,
-                        template_name,
-                        template_handle,
-                        verified,
-                        caption.strip() if caption else "",
-                    )
-
-                    st.image(bg_path, caption="Prévia do template (sem vídeo)", width=260)
+                    # Reutiliza o template (bg_path, box_x/y/w/h) já montado na Etapa 1
 
                     progress_bar = st.progress(0)
                     zip_buffer = io.BytesIO()
