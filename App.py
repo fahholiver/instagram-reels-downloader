@@ -22,16 +22,17 @@ st.set_page_config(
 # CONFIGURAÇÃO DO TEMPLATE (ajuste estes valores para mudar o layout)
 # -----------------------------------------------------------------------------
 CANVAS_WIDTH = 1080          # Largura final do vídeo gerado
-HEADER_HEIGHT = 340          # Altura da faixa com avatar + nome + @ + legenda
-BOX_TOP_MARGIN = 90          # Espaço entre o header e a caixa do vídeo
-BOX_HEIGHT = 1500            # Altura máxima da caixa = o "limite" do vídeo
-BOX_BOTTOM_MARGIN = 60       # Espaço em branco abaixo da caixa (antes faltava)
-CANVAS_HEIGHT = HEADER_HEIGHT + BOX_TOP_MARGIN + BOX_HEIGHT + BOX_BOTTOM_MARGIN
-# Com os valores acima o canvas fica 1080x1920 (proporção 9:16, padrão Reels)
+CANVAS_HEIGHT = 1920         # Altura final fixa (proporção 9:16, padrão Reels)
+
+HEADER_HEIGHT = 560          # Altura da faixa com avatar + nome + @ + legenda (ajustado p/ margem maior)
+BOX_TOP_MARGIN = 20          # Espaço entre o header e a caixa do vídeo
+BOX_BOTTOM_MARGIN = 280      # Espaço em branco abaixo da caixa
+BOX_HEIGHT = CANVAS_HEIGHT - HEADER_HEIGHT - BOX_TOP_MARGIN - BOX_BOTTOM_MARGIN
+# Altura da caixa (o "limite" do vídeo) é o que sobra depois das margens acima
 
 AVATAR_SIZE = 110
-AVATAR_MARGIN_LEFT = 80
-AVATAR_MARGIN_TOP = 300       # header mais para baixo (era 55)
+AVATAR_MARGIN_LEFT = 40
+AVATAR_MARGIN_TOP = 300      # margem grande no topo, como no seu exemplo
 
 BOX_SIDE_MARGIN = 40        # margem branca nas laterais da caixa do vídeo (mesma do avatar)
 
