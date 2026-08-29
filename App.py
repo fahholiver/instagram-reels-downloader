@@ -9,9 +9,18 @@ import tempfile
 import subprocess
 import textwrap
 import time
+import random
 from datetime import datetime, timezone, timedelta
 from supabase import create_client, ClientOptions
 from PIL import Image, ImageDraw, ImageFont, ImageOps
+from ig_publisher import (
+    IG_GRAPH_BASE,
+    get_ig_login_account,
+    create_media_container,
+    wait_for_container_ready,
+    publish_container,
+    publish_reel_now,
+)
 
 # Configuração da página
 st.set_page_config(
@@ -49,15 +58,10 @@ BOX_COLOR = (255, 255, 255)   # fundo/limite do vídeo agora é branco (era pret
 VERIFIED_BLUE = (59, 130, 246)
 
 # -----------------------------------------------------------------------------
-# CONFIGURAÇÃO DA PUBLICAÇÃO NO INSTAGRAM (Instagram API with Instagram Login)
+# CONFIGURAÇÃO DA PUBLICAÇÃO NO INSTAGRAM
 # -----------------------------------------------------------------------------
-# Esse é o host certo para tokens que começam com "IGAA" (gerados via login direto
-# do Instagram, sem precisar de Página do Facebook vinculada). É diferente do
-# graph.facebook.com, usado no fluxo antigo via Facebook Login.
-IG_GRAPH_BASE = "https://graph.instagram.com"
+# IG_GRAPH_BASE, timings de container etc. vêm do módulo ig_publisher.py
 IG_STORAGE_BUCKET = "reels-videos"  # bucket público no Supabase Storage (criar manualmente)
-IG_CONTAINER_POLL_SECONDS = 5
-IG_CONTAINER_MAX_WAIT_SECONDS = 180
 
 
 # -----------------------------------------------------------------------------
@@ -257,22 +261,6 @@ def download_bytes(url, headers, timeout=30):
 # -----------------------------------------------------------------------------
 # FUNÇÕES DE PUBLICAÇÃO NO INSTAGRAM (Meta Graph API)
 # -----------------------------------------------------------------------------
-def get_ig_login_account(access_token):
-    """
-    Para tokens do tipo Instagram API with Instagram Login (prefixo IGAA).
-    Não existe /me/accounts aqui -- a própria conta já vem direto em /me.
-    """
-    resp = requests.get(
-        f"{IG_GRAPH_BASE}/me",
-        params={"fields": "user_id,username,account_type", "access_token": access_token},
-        timeout=30,
-    )
-    data = resp.json()
-    if resp.status_code != 200 or "user_id" not in data:
-        raise RuntimeError(f"Erro ao buscar a conta: {data}")
-    return data
-
-
 def upload_video_bytes_to_storage(supabase_client, file_bytes, dest_filename, bucket=IG_STORAGE_BUCKET):
     """
     Sobe o vídeo (em bytes) para um bucket público do Supabase Storage e
@@ -287,73 +275,12 @@ def upload_video_bytes_to_storage(supabase_client, file_bytes, dest_filename, bu
     return public_url
 
 
-def create_media_container(ig_user_id, video_url, caption, access_token):
-    """Cria o container do Reels (etapa 1 de 2 da publicação)."""
-    resp = requests.post(
-        f"{IG_GRAPH_BASE}/{ig_user_id}/media",
-        data={
-            "media_type": "REELS",
-            "video_url": video_url,
-            "caption": caption or "",
-            "access_token": access_token,
-        },
-        timeout=60,
-    )
-    data = resp.json()
-    if resp.status_code != 200 or "id" not in data:
-        raise RuntimeError(f"Erro ao criar container: {data}")
-    return data["id"]
-
-
-def wait_for_container_ready(container_id, access_token):
-    """Aguarda a Meta terminar de processar o vídeo (status_code=FINISHED)."""
-    elapsed = 0
-    while elapsed < IG_CONTAINER_MAX_WAIT_SECONDS:
-        resp = requests.get(
-            f"{IG_GRAPH_BASE}/{container_id}",
-            params={"fields": "status_code,status", "access_token": access_token},
-            timeout=30,
-        )
-        data = resp.json()
-        status_code = data.get("status_code")
-
-        if status_code == "FINISHED":
-            return True
-        if status_code == "ERROR":
-            raise RuntimeError(f"A Meta reportou erro ao processar o vídeo: {data}")
-
-        time.sleep(IG_CONTAINER_POLL_SECONDS)
-        elapsed += IG_CONTAINER_POLL_SECONDS
-
-    raise TimeoutError("Tempo esgotado esperando a Meta processar o vídeo (container não ficou FINISHED).")
-
-
-def publish_container(ig_user_id, container_id, access_token):
-    """Publica de fato o container já processado (etapa 2 de 2)."""
-    resp = requests.post(
-        f"{IG_GRAPH_BASE}/{ig_user_id}/media_publish",
-        data={"creation_id": container_id, "access_token": access_token},
-        timeout=60,
-    )
-    data = resp.json()
-    if resp.status_code != 200 or "id" not in data:
-        raise RuntimeError(f"Erro ao publicar: {data}")
-    return data["id"]
-
-
-def publish_reel_now(ig_user_id, video_url, caption, access_token):
-    """Orquestra o fluxo completo: cria container -> espera -> publica."""
-    container_id = create_media_container(ig_user_id, video_url, caption, access_token)
-    wait_for_container_ready(container_id, access_token)
-    media_id = publish_container(ig_user_id, container_id, access_token)
-    return media_id
-
-
-def create_scheduled_post(supabase_client, ig_id, ig_username, video_url, caption, scheduled_time_iso):
+def create_scheduled_post(supabase_client, ig_id, ig_username, video_url, caption, scheduled_time_iso, storage_path=None):
     return supabase_client.table("scheduled_posts").insert({
         "ig_id": ig_id,
         "ig_username": ig_username,
         "video_url": video_url,
+        "storage_path": storage_path,
         "caption": caption,
         "scheduled_time": scheduled_time_iso,
         "status": "pending",
@@ -376,11 +303,22 @@ def update_scheduled_post_status(supabase_client, post_id, status, media_id=None
     supabase_client.table("scheduled_posts").update(update_data).eq("id", post_id).execute()
 
 
-def gerar_horarios_em_massa(data_inicio, dias_semana_selecionados, horarios_por_dia, quantidade_videos):
+def aplicar_jitter(dt, minutos=10):
+    """
+    Aplica uma variação aleatória de +/- 'minutos' ao horário desejado, pra
+    não publicar sempre no segundo exato (evita parecer bot). O horário que
+    o usuário digitou vira só uma referência, não um compromisso exato.
+    """
+    offset_segundos = random.randint(-minutos * 60, minutos * 60)
+    return dt + timedelta(seconds=offset_segundos)
+
+
+def gerar_horarios_em_massa(data_inicio, dias_semana_selecionados, horarios_por_dia, quantidade_videos, jitter_minutos=10):
     """
     Gera uma lista de datetimes para distribuir 'quantidade_videos' vídeos,
     publicando 'len(horarios_por_dia)' vídeos por dia, só nos dias da semana
     selecionados (0=Segunda ... 6=Domingo), a partir de 'data_inicio'.
+    Cada horário já sai com uma variação aleatória aplicada (jitter).
     """
     resultado = []
     dia_atual = data_inicio
@@ -392,11 +330,13 @@ def gerar_horarios_em_massa(data_inicio, dias_semana_selecionados, horarios_por_
             for horario in horarios_por_dia:
                 if len(resultado) >= quantidade_videos:
                     break
-                resultado.append(datetime.combine(dia_atual, horario))
+                horario_base = datetime.combine(dia_atual, horario)
+                resultado.append(aplicar_jitter(horario_base, jitter_minutos))
         dia_atual += timedelta(days=1)
         dias_verificados += 1
 
     return resultado
+
 
 
 # -----------------------------------------------------------------------------
@@ -709,8 +649,9 @@ else:
             schedule_date = st.date_input("Data:", key="ig_schedule_date")
         with col_b:
             schedule_time_input = st.time_input("Hora:", key="ig_schedule_time")
-        scheduled_dt = datetime.combine(schedule_date, schedule_time_input)
+        scheduled_dt = aplicar_jitter(datetime.combine(schedule_date, schedule_time_input))
         scheduled_datetime_iso = scheduled_dt.isoformat()
+        st.caption("O horário real de publicação varia até 10 minutos pra mais ou pra menos (evita parecer bot).")
 
     if st.button("Confirmar", key="ig_confirm_button"):
         if not ig_user_id.strip():
@@ -730,10 +671,17 @@ else:
                 if schedule_mode == "Agora":
                     with st.spinner("Publicando no Instagram (isso pode levar até 1-2 minutos)..."):
                         media_id = publish_reel_now(ig_user_id.strip(), public_video_url, ig_caption, IG_ACCESS_TOKEN)
+                    try:
+                        supabase.storage.from_(IG_STORAGE_BUCKET).remove([dest_filename])
+                    except Exception:
+                        pass  # publicação já deu certo, falha ao limpar não é crítica
                     st.success(f"Publicado com sucesso! ID da publicação: `{media_id}`")
                 else:
-                    create_scheduled_post(supabase, ig_user_id.strip(), None, public_video_url, ig_caption, scheduled_datetime_iso)
-                    st.success(f"Agendado para {scheduled_dt.strftime('%d/%m/%Y às %H:%M')}!")
+                    create_scheduled_post(
+                        supabase, ig_user_id.strip(), None, public_video_url, ig_caption,
+                        scheduled_datetime_iso, storage_path=dest_filename,
+                    )
+                    st.success(f"Agendado para perto de {scheduled_dt.strftime('%d/%m/%Y às %H:%M')}!")
 
             except Exception as publish_err:
                 st.error(f"Erro ao publicar/agendar: {publish_err}")
@@ -823,7 +771,8 @@ else:
                         dest_filename = f"reel_bulk_{int(time.time())}_{idx}.mp4"
                         public_url = upload_video_bytes_to_storage(supabase, video["bytes"], dest_filename)
                         create_scheduled_post(
-                            supabase, ig_user_id.strip(), None, public_url, bulk_caption, quando.isoformat()
+                            supabase, ig_user_id.strip(), None, public_url, bulk_caption,
+                            quando.isoformat(), storage_path=dest_filename,
                         )
                         criados += 1
                     except Exception as bulk_item_err:
@@ -847,7 +796,7 @@ else:
             for post in pending_posts:
                 st.write(f"🕒 **{post['scheduled_time']}** — {post.get('caption', '')[:60] or '(sem legenda)'}")
 
-            if st.button("🔄 Verificar e publicar agendados que já venceram"):
+            if st.button("🔄 Verificar e publicar agendados que já venceram (agora é só um backup, o cron faz isso sozinho)"):
                 now_iso = datetime.now().isoformat()
                 published_count = 0
                 for post in pending_posts:
@@ -857,6 +806,11 @@ else:
                                 post["ig_id"], post["video_url"], post.get("caption", ""), IG_ACCESS_TOKEN
                             )
                             update_scheduled_post_status(supabase, post["id"], "published", media_id=media_id)
+                            if post.get("storage_path"):
+                                try:
+                                    supabase.storage.from_(IG_STORAGE_BUCKET).remove([post["storage_path"]])
+                                except Exception:
+                                    pass  # publicação já deu certo, falha ao limpar não é crítica
                             published_count += 1
                         except Exception as auto_publish_err:
                             update_scheduled_post_status(supabase, post["id"], "error", error_message=str(auto_publish_err))
