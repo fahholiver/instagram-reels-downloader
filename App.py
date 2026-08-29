@@ -508,6 +508,11 @@ APIFY_TOKEN = st.secrets["APIFY_TOKEN"]
 with st.form("downloader_form"):
     username = st.text_input("Perfil do Instagram (sem @) — usado para buscar os vídeos:", placeholder="ex: instagram")
     count = st.number_input("Quantidade de vídeos para buscar:", min_value=1, max_value=20, value=3)
+    ordenar_por = st.radio(
+        "Buscar quais vídeos?",
+        ["Mais recentes", "Mais virais (visualizações + curtidas + comentários)"],
+        key="ordenar_por_input",
+    )
     submit_button = st.form_submit_button("Buscar e Baixar Reels (ZIP)")
 
 if submit_button:
@@ -523,22 +528,40 @@ if submit_button:
             try:
                 client = apify_client.ApifyClient(APIFY_TOKEN)
 
+                buscar_virais = ordenar_por.startswith("Mais virais")
+                # Pra achar os "mais virais" precisamos olhar mais posts do que o pedido
+                # e escolher os melhores depois -- senão só teria os N mais recentes pra escolher.
+                pool_size = min(int(count) * 5, 100) if buscar_virais else int(count)
+
                 # Posts/Reels do perfil
                 run_input = {
                     "directUrls": [f"https://www.instagram.com/{clean_username}/"],
                     "resultsType": "posts",
-                    "resultsLimit": count,
+                    "resultsLimit": pool_size,
                 }
                 run = client.actor("apify/instagram-scraper").call(run_input=run_input)
                 dataset_id = run.get("defaultDatasetId") if isinstance(run, dict) else run.default_dataset_id
                 dataset_items = client.dataset(dataset_id).list_items().items
 
-                video_urls = []
+                video_items = []
                 for item in dataset_items:
-                    if item.get("isVideo") and item.get("videoUrl"):
-                        video_urls.append(item.get("videoUrl"))
-                    elif item.get("type") == "Video" and item.get("videoUrl"):
-                        video_urls.append(item.get("videoUrl"))
+                    is_video = (item.get("isVideo") and item.get("videoUrl")) or (
+                        item.get("type") == "Video" and item.get("videoUrl")
+                    )
+                    if is_video:
+                        video_items.append(item)
+
+                if buscar_virais:
+                    def score_engajamento(item):
+                        views = item.get("videoViewCount") or item.get("videoPlayCount") or 0
+                        likes = item.get("likesCount") or 0
+                        comments = item.get("commentsCount") or 0
+                        return views + likes + comments
+
+                    video_items.sort(key=score_engajamento, reverse=True)
+
+                video_items = video_items[:int(count)]
+                video_urls = [item.get("videoUrl") for item in video_items]
 
                 if not video_urls:
                     st.error("Nenhum vídeo/Reel público encontrado para este perfil.")
@@ -613,6 +636,18 @@ st.markdown("---")
 # ETAPA 3 — AGENDAR / PUBLICAR NO INSTAGRAM (uso pessoal, modo teste)
 # -----------------------------------------------------------------------------
 st.header("3️⃣ Agendar/Publicar no Instagram (uso pessoal)")
+
+IG_SCHEDULING_ENABLED = st.secrets.get("IG_SCHEDULING_ENABLED", False)
+
+if not IG_SCHEDULING_ENABLED:
+    st.warning(
+        "🔒 Publicação/agendamento automático está **desativado por enquanto** "
+        "(pra evitar risco de bloqueio de conta enquanto isso é testado com calma). "
+        "O código continua todo aqui, só não roda. Pra reativar quando quiser testar de "
+        "novo: adicione o secret `IG_SCHEDULING_ENABLED = \"true\"` nas configurações do Streamlit "
+        "e não esqueça de reativar o workflow no GitHub Actions também."
+    )
+    st.stop()
 
 if "IG_ACCESS_TOKEN" not in st.secrets:
     st.info(
