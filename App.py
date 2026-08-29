@@ -31,6 +31,8 @@ AVATAR_SIZE = 110
 AVATAR_MARGIN_LEFT = 40
 AVATAR_MARGIN_TOP = 55
 
+BOX_SIDE_MARGIN = 40        # margem branca nas laterais da caixa do vídeo (mesma do avatar)
+
 # Fontes (instaladas via packages.txt -> fonts-dejavu-core). Se não existirem,
 # cai para a fonte padrão do Pillow (mais simples, mas funciona).
 FONT_BOLD_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
@@ -171,9 +173,9 @@ def build_background_canvas(avatar_bytes, full_name, username, verified, caption
             spacing=6,
         )
 
-    # --- Caixa preta = o limite onde o vídeo pode ocupar ---
-    box_x, box_y = 0, HEADER_HEIGHT + BOX_TOP_MARGIN
-    box_w, box_h = CANVAS_WIDTH, BOX_HEIGHT
+    # --- Caixa = o limite onde o vídeo pode ocupar (com margem nas laterais) ---
+    box_x, box_y = BOX_SIDE_MARGIN, HEADER_HEIGHT + BOX_TOP_MARGIN
+    box_w, box_h = CANVAS_WIDTH - (2 * BOX_SIDE_MARGIN), BOX_HEIGHT
     draw.rectangle((box_x, box_y, box_x + box_w, box_y + box_h), fill=BOX_COLOR)
 
     tmp_path = os.path.join(tempfile.gettempdir(), f"bg_{username}.png")
