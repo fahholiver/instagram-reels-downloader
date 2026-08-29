@@ -26,12 +26,11 @@ CANVAS_HEIGHT = 1920         # Altura final fixa (proporção 9:16, padrão Reel
 
 HEADER_HEIGHT = 560          # Altura da faixa com avatar + nome + @ + legenda (ajustado p/ margem maior)
 BOX_TOP_MARGIN = 20          # Espaço entre o header e a caixa do vídeo
-BOX_BOTTOM_MARGIN = 280      # Espaço em branco abaixo da caixa
+BOX_BOTTOM_MARGIN = 100      # Espaço em branco abaixo da caixa (reduzido)
 BOX_HEIGHT = CANVAS_HEIGHT - HEADER_HEIGHT - BOX_TOP_MARGIN - BOX_BOTTOM_MARGIN
 # Altura da caixa (o "limite" do vídeo) é o que sobra depois das margens acima
 
 AVATAR_SIZE = 110
-AVATAR_MARGIN_LEFT = 40
 AVATAR_MARGIN_TOP = 300      # margem grande no topo, como no seu exemplo
 
 BOX_SIDE_MARGIN = 40        # margem branca nas laterais da caixa do vídeo (mesma do avatar)
@@ -123,12 +122,34 @@ def build_background_canvas(avatar_bytes, full_name, username, verified, caption
     canvas = Image.new("RGB", (CANVAS_WIDTH, CANVAS_HEIGHT), BG_COLOR)
     draw = ImageDraw.Draw(canvas)
 
+    # --- Calcula a largura do bloco (avatar + espaço + texto) para centralizar ---
+    avatar_text_gap = 30
+    name_font = load_font(FONT_BOLD_PATH, 46)
+    handle_font = load_font(FONT_REGULAR_PATH, 36)
+
+    display_name = full_name or username
+    handle_text = f"@{username}"
+
+    name_w = draw.textlength(display_name, font=name_font)
+    handle_w = draw.textlength(handle_text, font=handle_font)
+
+    badge_size = 36
+    badge_gap = 14
+    name_line_w = name_w + (badge_gap + badge_size if verified else 0)
+
+    text_block_w = max(name_line_w, handle_w)
+    total_block_w = AVATAR_SIZE + avatar_text_gap + text_block_w
+
+    block_start_x = (CANVAS_WIDTH - total_block_w) / 2
+    avatar_x = block_start_x
+    text_x = block_start_x + AVATAR_SIZE + avatar_text_gap
+
     # --- Avatar ---
     avatar_pasted = False
     if avatar_bytes:
         try:
             avatar = make_circular_avatar(avatar_bytes, AVATAR_SIZE)
-            canvas.paste(avatar, (AVATAR_MARGIN_LEFT, AVATAR_MARGIN_TOP), avatar)
+            canvas.paste(avatar, (int(avatar_x), AVATAR_MARGIN_TOP), avatar)
             avatar_pasted = True
         except Exception as avatar_err:
             avatar_pasted = False
@@ -137,29 +158,23 @@ def build_background_canvas(avatar_bytes, full_name, username, verified, caption
     if not avatar_pasted:
         draw.ellipse(
             (
-                AVATAR_MARGIN_LEFT,
+                avatar_x,
                 AVATAR_MARGIN_TOP,
-                AVATAR_MARGIN_LEFT + AVATAR_SIZE,
+                avatar_x + AVATAR_SIZE,
                 AVATAR_MARGIN_TOP + AVATAR_SIZE,
             ),
             fill=(210, 210, 210),
         )
 
     # --- Nome + selo verificado ---
-    text_x = AVATAR_MARGIN_LEFT + AVATAR_SIZE + 30
-    name_font = load_font(FONT_BOLD_PATH, 46)
-    handle_font = load_font(FONT_REGULAR_PATH, 36)
-
     name_y = AVATAR_MARGIN_TOP + 2
-    display_name = full_name or username
     draw.text((text_x, name_y), display_name, font=name_font, fill=TEXT_COLOR)
 
     if verified:
-        name_w = draw.textlength(display_name, font=name_font)
-        draw_verified_badge(draw, text_x + name_w + 14, name_y + 6, size=36)
+        draw_verified_badge(draw, text_x + name_w + badge_gap, name_y + 6, size=badge_size)
 
     handle_y = name_y + 58
-    draw.text((text_x, handle_y), f"@{username}", font=handle_font, fill=HANDLE_COLOR)
+    draw.text((text_x, handle_y), handle_text, font=handle_font, fill=HANDLE_COLOR)
 
     # --- Legenda opcional (texto extra abaixo do @) ---
     if caption:
