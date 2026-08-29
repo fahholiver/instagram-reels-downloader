@@ -4,3 +4,4 @@ yt-dlp
 supabase
 stripe
 apify-client
+Pillow
