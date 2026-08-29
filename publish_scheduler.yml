@@ -1,0 +1,28 @@
+name: Publicar Reels agendados
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # a cada 5 minutos (mínimo permitido pelo GitHub)
+  workflow_dispatch: {}       # permite rodar manualmente pela aba Actions também
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependências
+        run: pip install supabase requests
+
+      - name: Rodar verificação/publicação
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+        run: python cron_publish.py
