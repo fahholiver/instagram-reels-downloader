@@ -8,6 +8,8 @@ import shutil
 import tempfile
 import subprocess
 import textwrap
+import time
+from datetime import datetime, timezone
 from supabase import create_client, ClientOptions
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
@@ -26,7 +28,7 @@ CANVAS_HEIGHT = 1920         # Altura final fixa (proporção 9:16, padrão Reel
 
 HEADER_HEIGHT = 560          # Altura da faixa com avatar + nome + @ + legenda (ajustado p/ margem maior)
 BOX_TOP_MARGIN = 20          # Espaço entre o header e a caixa do vídeo
-BOX_BOTTOM_MARGIN = 100      # Espaço em branco abaixo da caixa (reduzido)
+BOX_BOTTOM_MARGIN = 40       # Espaço em branco abaixo da caixa (igual à margem lateral)
 BOX_HEIGHT = CANVAS_HEIGHT - HEADER_HEIGHT - BOX_TOP_MARGIN - BOX_BOTTOM_MARGIN
 # Altura da caixa (o "limite" do vídeo) é o que sobra depois das margens acima
 
@@ -45,6 +47,15 @@ TEXT_COLOR = (10, 10, 10)
 HANDLE_COLOR = (100, 100, 100)
 BOX_COLOR = (255, 255, 255)   # fundo/limite do vídeo agora é branco (era preto)
 VERIFIED_BLUE = (59, 130, 246)
+
+# -----------------------------------------------------------------------------
+# CONFIGURAÇÃO DA PUBLICAÇÃO NO INSTAGRAM (Graph API)
+# -----------------------------------------------------------------------------
+IG_GRAPH_VERSION = "v21.0"
+IG_GRAPH_BASE = f"https://graph.facebook.com/{IG_GRAPH_VERSION}"
+IG_STORAGE_BUCKET = "reels-videos"  # bucket público no Supabase Storage (criar manualmente)
+IG_CONTAINER_POLL_SECONDS = 5
+IG_CONTAINER_MAX_WAIT_SECONDS = 180
 
 
 # -----------------------------------------------------------------------------
@@ -239,6 +250,154 @@ def download_bytes(url, headers, timeout=30):
     resp = requests.get(url, headers=headers, timeout=timeout)
     resp.raise_for_status()
     return resp.content
+
+
+# -----------------------------------------------------------------------------
+# FUNÇÕES DE PUBLICAÇÃO NO INSTAGRAM (Meta Graph API)
+# -----------------------------------------------------------------------------
+def get_ig_business_accounts(access_token):
+    """
+    Lista as Páginas do Facebook administradas pelo dono do token e,
+    para cada uma, tenta achar a conta Instagram Business vinculada.
+    Retorna uma lista de dicts: [{"page_id", "page_name", "ig_id", "ig_username"}]
+    """
+    resp = requests.get(
+        f"{IG_GRAPH_BASE}/me/accounts",
+        params={"access_token": access_token, "fields": "id,name"},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    pages = resp.json().get("data", [])
+
+    results = []
+    for page in pages:
+        page_id = page.get("id")
+        page_name = page.get("name")
+        detail_resp = requests.get(
+            f"{IG_GRAPH_BASE}/{page_id}",
+            params={
+                "fields": "instagram_business_account{id,username}",
+                "access_token": access_token,
+            },
+            timeout=30,
+        )
+        detail_resp.raise_for_status()
+        ig_account = detail_resp.json().get("instagram_business_account")
+
+        results.append({
+            "page_id": page_id,
+            "page_name": page_name,
+            "ig_id": ig_account.get("id") if ig_account else None,
+            "ig_username": ig_account.get("username") if ig_account else None,
+        })
+
+    return results
+
+
+def upload_video_to_supabase_storage(supabase_client, local_path, dest_filename, bucket=IG_STORAGE_BUCKET):
+    """
+    Sobe o vídeo para um bucket público do Supabase Storage e retorna a URL
+    pública -- a Meta precisa conseguir baixar o vídeo por essa URL.
+    """
+    with open(local_path, "rb") as f:
+        file_bytes = f.read()
+
+    supabase_client.storage.from_(bucket).upload(
+        dest_filename,
+        file_bytes,
+        {"content-type": "video/mp4", "upsert": "true"},
+    )
+    public_url = supabase_client.storage.from_(bucket).get_public_url(dest_filename)
+    return public_url
+
+
+def create_media_container(ig_user_id, video_url, caption, access_token):
+    """Cria o container do Reels (etapa 1 de 2 da publicação)."""
+    resp = requests.post(
+        f"{IG_GRAPH_BASE}/{ig_user_id}/media",
+        data={
+            "media_type": "REELS",
+            "video_url": video_url,
+            "caption": caption or "",
+            "access_token": access_token,
+        },
+        timeout=60,
+    )
+    data = resp.json()
+    if resp.status_code != 200 or "id" not in data:
+        raise RuntimeError(f"Erro ao criar container: {data}")
+    return data["id"]
+
+
+def wait_for_container_ready(container_id, access_token):
+    """Aguarda a Meta terminar de processar o vídeo (status_code=FINISHED)."""
+    elapsed = 0
+    while elapsed < IG_CONTAINER_MAX_WAIT_SECONDS:
+        resp = requests.get(
+            f"{IG_GRAPH_BASE}/{container_id}",
+            params={"fields": "status_code,status", "access_token": access_token},
+            timeout=30,
+        )
+        data = resp.json()
+        status_code = data.get("status_code")
+
+        if status_code == "FINISHED":
+            return True
+        if status_code == "ERROR":
+            raise RuntimeError(f"A Meta reportou erro ao processar o vídeo: {data}")
+
+        time.sleep(IG_CONTAINER_POLL_SECONDS)
+        elapsed += IG_CONTAINER_POLL_SECONDS
+
+    raise TimeoutError("Tempo esgotado esperando a Meta processar o vídeo (container não ficou FINISHED).")
+
+
+def publish_container(ig_user_id, container_id, access_token):
+    """Publica de fato o container já processado (etapa 2 de 2)."""
+    resp = requests.post(
+        f"{IG_GRAPH_BASE}/{ig_user_id}/media_publish",
+        data={"creation_id": container_id, "access_token": access_token},
+        timeout=60,
+    )
+    data = resp.json()
+    if resp.status_code != 200 or "id" not in data:
+        raise RuntimeError(f"Erro ao publicar: {data}")
+    return data["id"]
+
+
+def publish_reel_now(ig_user_id, video_url, caption, access_token):
+    """Orquestra o fluxo completo: cria container -> espera -> publica."""
+    container_id = create_media_container(ig_user_id, video_url, caption, access_token)
+    wait_for_container_ready(container_id, access_token)
+    media_id = publish_container(ig_user_id, container_id, access_token)
+    return media_id
+
+
+def create_scheduled_post(supabase_client, ig_id, ig_username, video_url, caption, scheduled_time_iso):
+    return supabase_client.table("scheduled_posts").insert({
+        "ig_id": ig_id,
+        "ig_username": ig_username,
+        "video_url": video_url,
+        "caption": caption,
+        "scheduled_time": scheduled_time_iso,
+        "status": "pending",
+    }).execute()
+
+
+def list_scheduled_posts(supabase_client, status=None):
+    query = supabase_client.table("scheduled_posts").select("*").order("scheduled_time")
+    if status:
+        query = query.eq("status", status)
+    return query.execute().data
+
+
+def update_scheduled_post_status(supabase_client, post_id, status, media_id=None, error_message=None):
+    update_data = {"status": status}
+    if media_id:
+        update_data["published_media_id"] = media_id
+    if error_message:
+        update_data["error_message"] = error_message
+    supabase_client.table("scheduled_posts").update(update_data).eq("id", post_id).execute()
 
 
 # -----------------------------------------------------------------------------
@@ -496,3 +655,115 @@ if submit_button:
 
             except Exception as e:
                 st.error(f"Erro ao processar a requisição: {e}")
+
+st.markdown("---")
+
+# -----------------------------------------------------------------------------
+# ETAPA 3 — AGENDAR / PUBLICAR NO INSTAGRAM (uso pessoal, modo teste)
+# -----------------------------------------------------------------------------
+st.header("3️⃣ Agendar/Publicar no Instagram (uso pessoal)")
+
+if "IG_ACCESS_TOKEN" not in st.secrets:
+    st.info(
+        "Para usar essa etapa, adicione `IG_ACCESS_TOKEN` nos Secrets do Streamlit "
+        "(gerado no Graph API Explorer do Meta for Developers)."
+    )
+else:
+    IG_ACCESS_TOKEN = st.secrets["IG_ACCESS_TOKEN"]
+
+    # --- Descobrir a Instagram Business Account ID ---
+    with st.expander("🔍 Descobrir minha Instagram Business Account ID"):
+        if st.button("Buscar minhas contas conectadas"):
+            try:
+                accounts = get_ig_business_accounts(IG_ACCESS_TOKEN)
+                if not accounts:
+                    st.warning("Nenhuma Página do Facebook encontrada para esse token.")
+                else:
+                    for acc in accounts:
+                        if acc["ig_id"]:
+                            st.success(
+                                f"Página **{acc['page_name']}** → Instagram **@{acc['ig_username']}** "
+                                f"(ID: `{acc['ig_id']}`)"
+                            )
+                        else:
+                            st.warning(f"Página **{acc['page_name']}** não tem Instagram Business vinculado.")
+            except Exception as lookup_err:
+                st.error(f"Erro ao buscar contas: {lookup_err}")
+
+    st.markdown("Cole aqui o ID que você encontrou acima:")
+    ig_user_id = st.text_input("Instagram Business Account ID:", key="ig_user_id_input")
+
+    st.subheader("Publicar um vídeo")
+    schedule_video_file = st.file_uploader("Vídeo (.mp4) já com o template aplicado:", type=["mp4"], key="ig_video_uploader")
+    ig_caption = st.text_area("Legenda do Reels:", key="ig_caption_input")
+    schedule_mode = st.radio("Quando publicar?", ["Agora", "Agendar para depois"], key="ig_schedule_mode")
+
+    scheduled_datetime_iso = None
+    if schedule_mode == "Agendar para depois":
+        col_a, col_b = st.columns(2)
+        with col_a:
+            schedule_date = st.date_input("Data:", key="ig_schedule_date")
+        with col_b:
+            schedule_time_input = st.time_input("Hora:", key="ig_schedule_time")
+        scheduled_dt = datetime.combine(schedule_date, schedule_time_input)
+        scheduled_datetime_iso = scheduled_dt.isoformat()
+
+    if st.button("Confirmar", key="ig_confirm_button"):
+        if not ig_user_id.strip():
+            st.warning("Preencha a Instagram Business Account ID acima.")
+        elif schedule_video_file is None:
+            st.warning("Envie o vídeo que deseja publicar.")
+        elif not supabase:
+            st.error("Conexão com o Supabase não disponível — não dá pra guardar o vídeo.")
+        else:
+            try:
+                with st.spinner("Enviando vídeo para o Storage..."):
+                    tmp_video_path = os.path.join(tempfile.gettempdir(), f"ig_upload_{int(time.time())}.mp4")
+                    with open(tmp_video_path, "wb") as f:
+                        f.write(schedule_video_file.getvalue())
+
+                    dest_filename = f"reel_{int(time.time())}.mp4"
+                    public_video_url = upload_video_to_supabase_storage(supabase, tmp_video_path, dest_filename)
+
+                if schedule_mode == "Agora":
+                    with st.spinner("Publicando no Instagram (isso pode levar até 1-2 minutos)..."):
+                        media_id = publish_reel_now(ig_user_id.strip(), public_video_url, ig_caption, IG_ACCESS_TOKEN)
+                    st.success(f"Publicado com sucesso! ID da publicação: `{media_id}`")
+                else:
+                    create_scheduled_post(supabase, ig_user_id.strip(), None, public_video_url, ig_caption, scheduled_datetime_iso)
+                    st.success(f"Agendado para {scheduled_dt.strftime('%d/%m/%Y às %H:%M')}!")
+
+            except Exception as publish_err:
+                st.error(f"Erro ao publicar/agendar: {publish_err}")
+
+    st.subheader("📋 Agendamentos pendentes")
+    try:
+        pending_posts = list_scheduled_posts(supabase, status="pending") if supabase else []
+        if not pending_posts:
+            st.caption("Nenhum agendamento pendente.")
+        else:
+            for post in pending_posts:
+                st.write(f"🕒 **{post['scheduled_time']}** — {post.get('caption', '')[:60] or '(sem legenda)'}")
+
+            if st.button("🔄 Verificar e publicar agendados que já venceram"):
+                now_iso = datetime.now().isoformat()
+                published_count = 0
+                for post in pending_posts:
+                    if post["scheduled_time"] <= now_iso:
+                        try:
+                            media_id = publish_reel_now(
+                                post["ig_id"], post["video_url"], post.get("caption", ""), IG_ACCESS_TOKEN
+                            )
+                            update_scheduled_post_status(supabase, post["id"], "published", media_id=media_id)
+                            published_count += 1
+                        except Exception as auto_publish_err:
+                            update_scheduled_post_status(supabase, post["id"], "error", error_message=str(auto_publish_err))
+                            st.error(f"Erro ao publicar agendamento {post['id']}: {auto_publish_err}")
+
+                if published_count:
+                    st.success(f"{published_count} vídeo(s) publicado(s)!")
+                    st.rerun()
+                else:
+                    st.info("Nenhum agendamento estava vencido ainda.")
+    except Exception as list_err:
+        st.error(f"Erro ao listar agendamentos: {list_err}")
