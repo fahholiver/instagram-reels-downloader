@@ -11,12 +11,6 @@ import textwrap
 from supabase import create_client, ClientOptions
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-try:
-    from streamlit_cropper import st_cropper
-    CROPPER_AVAILABLE = True
-except ImportError:
-    CROPPER_AVAILABLE = False
-
 # Configuração da página
 st.set_page_config(
     page_title="Instagram Reels Downloader",
@@ -59,10 +53,32 @@ def load_font(path, size):
         return ImageFont.load_default()
 
 
+def crop_avatar_region(img, zoom, offset_x_pct, offset_y_pct):
+    """
+    Recorta uma região quadrada da imagem original, controlada por zoom
+    (1.0 = sem zoom, mostra o maior quadrado possível) e posição
+    horizontal/vertical (0 a 100%, para "passear" pela imagem quando
+    o zoom deixa sobra para os lados).
+    """
+    width, height = img.size
+    base_side = min(width, height)
+    side = base_side / max(zoom, 1.0)
+    side = max(side, 10)  # nunca deixar o lado zerar
+
+    max_x_offset = max(width - side, 0)
+    max_y_offset = max(height - side, 0)
+
+    x0 = (offset_x_pct / 100.0) * max_x_offset
+    y0 = (offset_y_pct / 100.0) * max_y_offset
+
+    box = (x0, y0, x0 + side, y0 + side)
+    return img.crop(box)
+
+
 def make_circular_avatar(image_data, size):
     """
     Recorta a foto de perfil em um círculo, sem distorcer.
-    Aceita tanto bytes quanto um objeto PIL.Image (já recortado pelo cropper).
+    Aceita tanto bytes quanto um objeto PIL.Image (já recortado/com zoom aplicado).
     """
     if isinstance(image_data, Image.Image):
         img = image_data.convert("RGBA")
@@ -109,8 +125,9 @@ def build_background_canvas(avatar_bytes, full_name, username, verified, caption
             avatar = make_circular_avatar(avatar_bytes, AVATAR_SIZE)
             canvas.paste(avatar, (AVATAR_MARGIN_LEFT, AVATAR_MARGIN_TOP), avatar)
             avatar_pasted = True
-        except Exception:
+        except Exception as avatar_err:
             avatar_pasted = False
+            st.warning(f"Não foi possível usar a foto de perfil no template: {avatar_err}")
 
     if not avatar_pasted:
         draw.ellipse(
@@ -308,14 +325,6 @@ if shutil.which("ffmpeg") is None:
         "(e reinicie o app) para que a montagem do template funcione."
     )
 
-if not CROPPER_AVAILABLE:
-    st.warning(
-        "⚠️ A biblioteca `streamlit-cropper` não está instalada — a foto será "
-        "apenas centralizada e recortada automaticamente, sem controle manual "
-        "de recorte/zoom. Adicione `streamlit-cropper` ao `requirements.txt` "
-        "para habilitar o ajuste manual."
-    )
-
 # -----------------------------------------------------------------------------
 # ETAPA 1 — MONTAR E PRÉ-VISUALIZAR O TEMPLATE
 # -----------------------------------------------------------------------------
@@ -325,20 +334,21 @@ avatar_file = st.file_uploader("Foto de perfil (opcional):", type=["png", "jpg",
 
 avatar_data = None
 if avatar_file is not None:
-    original_img = Image.open(avatar_file).convert("RGB")
+    try:
+        original_img = Image.open(avatar_file).convert("RGB")
+        st.image(original_img, caption="Foto enviada", width=150)
 
-    if CROPPER_AVAILABLE:
-        st.caption("Arraste as bordas do quadro azul para recortar/ampliar a foto — o miolo selecionado é o que vira o avatar circular:")
-        avatar_data = st_cropper(
-            original_img,
-            realtime_update=True,
-            box_color="#3b82f6",
-            aspect_ratio=(1, 1),
-            return_type="image",
-            key="avatar_cropper",
-        )
-    else:
-        avatar_data = original_img
+        zoom = st.slider("Zoom da foto:", min_value=1.0, max_value=3.0, value=1.0, step=0.05, key="avatar_zoom")
+        pos_x = st.slider("Posição horizontal:", min_value=0, max_value=100, value=50, key="avatar_pos_x")
+        pos_y = st.slider("Posição vertical:", min_value=0, max_value=100, value=50, key="avatar_pos_y")
+
+        avatar_data = crop_avatar_region(original_img, zoom, pos_x, pos_y)
+
+        preview_avatar = make_circular_avatar(avatar_data, 150)
+        st.image(preview_avatar, caption="Prévia do avatar recortado")
+    except Exception as upload_err:
+        st.error(f"Não foi possível processar a imagem enviada: {upload_err}")
+        avatar_data = None
 
 col1, col2 = st.columns(2)
 with col1:
