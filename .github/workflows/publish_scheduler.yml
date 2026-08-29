@@ -1,9 +1,11 @@
 name: Publicar Reels agendados
 
 on:
-  schedule:
-    - cron: "*/5 * * * *"   # a cada 5 minutos (mínimo permitido pelo GitHub)
-  workflow_dispatch: {}       # permite rodar manualmente pela aba Actions também
+  # DESATIVADO TEMPORARIAMENTE (risco de bloqueio de conta) --
+  # pra reativar, é só descomentar as 2 linhas abaixo:
+  # schedule:
+  #   - cron: "*/5 * * * *"   # a cada 5 minutos (mínimo permitido pelo GitHub)
+  workflow_dispatch: {}       # continua disponível pra rodar manualmente na aba Actions, pra testar
 
 jobs:
   publish:
