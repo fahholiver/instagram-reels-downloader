@@ -49,10 +49,12 @@ BOX_COLOR = (255, 255, 255)   # fundo/limite do vídeo agora é branco (era pret
 VERIFIED_BLUE = (59, 130, 246)
 
 # -----------------------------------------------------------------------------
-# CONFIGURAÇÃO DA PUBLICAÇÃO NO INSTAGRAM (Graph API)
+# CONFIGURAÇÃO DA PUBLICAÇÃO NO INSTAGRAM (Instagram API with Instagram Login)
 # -----------------------------------------------------------------------------
-IG_GRAPH_VERSION = "v21.0"
-IG_GRAPH_BASE = f"https://graph.facebook.com/{IG_GRAPH_VERSION}"
+# Esse é o host certo para tokens que começam com "IGAA" (gerados via login direto
+# do Instagram, sem precisar de Página do Facebook vinculada). É diferente do
+# graph.facebook.com, usado no fluxo antigo via Facebook Login.
+IG_GRAPH_BASE = "https://graph.instagram.com"
 IG_STORAGE_BUCKET = "reels-videos"  # bucket público no Supabase Storage (criar manualmente)
 IG_CONTAINER_POLL_SECONDS = 5
 IG_CONTAINER_MAX_WAIT_SECONDS = 180
@@ -255,43 +257,20 @@ def download_bytes(url, headers, timeout=30):
 # -----------------------------------------------------------------------------
 # FUNÇÕES DE PUBLICAÇÃO NO INSTAGRAM (Meta Graph API)
 # -----------------------------------------------------------------------------
-def get_ig_business_accounts(access_token):
+def get_ig_login_account(access_token):
     """
-    Lista as Páginas do Facebook administradas pelo dono do token e,
-    para cada uma, tenta achar a conta Instagram Business vinculada.
-    Retorna uma lista de dicts: [{"page_id", "page_name", "ig_id", "ig_username"}]
+    Para tokens do tipo Instagram API with Instagram Login (prefixo IGAA).
+    Não existe /me/accounts aqui -- a própria conta já vem direto em /me.
     """
     resp = requests.get(
-        f"{IG_GRAPH_BASE}/me/accounts",
-        params={"access_token": access_token, "fields": "id,name"},
+        f"{IG_GRAPH_BASE}/me",
+        params={"fields": "user_id,username,account_type", "access_token": access_token},
         timeout=30,
     )
-    resp.raise_for_status()
-    pages = resp.json().get("data", [])
-
-    results = []
-    for page in pages:
-        page_id = page.get("id")
-        page_name = page.get("name")
-        detail_resp = requests.get(
-            f"{IG_GRAPH_BASE}/{page_id}",
-            params={
-                "fields": "instagram_business_account{id,username}",
-                "access_token": access_token,
-            },
-            timeout=30,
-        )
-        detail_resp.raise_for_status()
-        ig_account = detail_resp.json().get("instagram_business_account")
-
-        results.append({
-            "page_id": page_id,
-            "page_name": page_name,
-            "ig_id": ig_account.get("id") if ig_account else None,
-            "ig_username": ig_account.get("username") if ig_account else None,
-        })
-
-    return results
+    data = resp.json()
+    if resp.status_code != 200 or "user_id" not in data:
+        raise RuntimeError(f"Erro ao buscar a conta: {data}")
+    return data
 
 
 def upload_video_to_supabase_storage(supabase_client, local_path, dest_filename, bucket=IG_STORAGE_BUCKET):
@@ -671,24 +650,17 @@ if "IG_ACCESS_TOKEN" not in st.secrets:
 else:
     IG_ACCESS_TOKEN = st.secrets["IG_ACCESS_TOKEN"]
 
-    # --- Descobrir a Instagram Business Account ID ---
-    with st.expander("🔍 Descobrir minha Instagram Business Account ID"):
-        if st.button("Buscar minhas contas conectadas"):
+    # --- Descobrir a conta via Instagram Login ---
+    with st.expander("🔍 Descobrir minha Instagram Account ID"):
+        if st.button("Buscar minha conta"):
             try:
-                accounts = get_ig_business_accounts(IG_ACCESS_TOKEN)
-                if not accounts:
-                    st.warning("Nenhuma Página do Facebook encontrada para esse token.")
-                else:
-                    for acc in accounts:
-                        if acc["ig_id"]:
-                            st.success(
-                                f"Página **{acc['page_name']}** → Instagram **@{acc['ig_username']}** "
-                                f"(ID: `{acc['ig_id']}`)"
-                            )
-                        else:
-                            st.warning(f"Página **{acc['page_name']}** não tem Instagram Business vinculado.")
+                account = get_ig_login_account(IG_ACCESS_TOKEN)
+                st.success(
+                    f"Conta **@{account['username']}** ({account.get('account_type', '')}) "
+                    f"→ ID: `{account['user_id']}`"
+                )
             except Exception as lookup_err:
-                st.error(f"Erro ao buscar contas: {lookup_err}")
+                st.error(f"Erro ao buscar a conta: {lookup_err}")
 
     st.markdown("Cole aqui o ID que você encontrou acima:")
     ig_user_id = st.text_input("Instagram Business Account ID:", key="ig_user_id_input")
