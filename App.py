@@ -3,7 +3,13 @@ import apify_client
 import requests
 import zipfile
 import io
+import os
+import shutil
+import tempfile
+import subprocess
+import textwrap
 from supabase import create_client, ClientOptions
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 # Configuração da página
 st.set_page_config(
@@ -11,6 +17,218 @@ st.set_page_config(
     page_icon="📥",
     layout="centered"
 )
+
+# -----------------------------------------------------------------------------
+# CONFIGURAÇÃO DO TEMPLATE (ajuste estes valores para mudar o layout)
+# -----------------------------------------------------------------------------
+CANVAS_WIDTH = 1080          # Largura final do vídeo gerado
+HEADER_HEIGHT = 230          # Altura da faixa com avatar + nome + @
+BOX_TOP_MARGIN = 20          # Espaço entre o header e a caixa do vídeo
+BOX_HEIGHT = 1500            # Altura máxima da caixa = o "limite" do vídeo
+CANVAS_HEIGHT = HEADER_HEIGHT + BOX_TOP_MARGIN + BOX_HEIGHT
+
+AVATAR_SIZE = 110
+AVATAR_MARGIN_LEFT = 40
+AVATAR_MARGIN_TOP = 55
+
+# Fontes (instaladas via packages.txt -> fonts-dejavu-core). Se não existirem,
+# cai para a fonte padrão do Pillow (mais simples, mas funciona).
+FONT_BOLD_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+FONT_REGULAR_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+
+BG_COLOR = (255, 255, 255)
+TEXT_COLOR = (10, 10, 10)
+HANDLE_COLOR = (100, 100, 100)
+BOX_COLOR = (0, 0, 0)
+VERIFIED_BLUE = (59, 130, 246)
+
+
+# -----------------------------------------------------------------------------
+# FUNÇÕES DE TEMPLATE / VÍDEO
+# -----------------------------------------------------------------------------
+def load_font(path, size):
+    try:
+        return ImageFont.truetype(path, size)
+    except Exception:
+        return ImageFont.load_default()
+
+
+def make_circular_avatar(image_bytes, size):
+    """Recorta a foto de perfil em um círculo, sem distorcer."""
+    img = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
+    img = ImageOps.fit(img, (size, size), Image.LANCZOS)
+    mask = Image.new("L", (size, size), 0)
+    mdraw = ImageDraw.Draw(mask)
+    mdraw.ellipse((0, 0, size, size), fill=255)
+    output = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    output.paste(img, (0, 0), mask)
+    return output
+
+
+def draw_verified_badge(draw_ctx, x, y, size=34):
+    """Desenha um selo azul de verificado com um check branco."""
+    draw_ctx.ellipse((x, y, x + size, y + size), fill=VERIFIED_BLUE)
+    cx, cy = x + size / 2, y + size / 2
+    draw_ctx.line(
+        [
+            (cx - size * 0.22, cy),
+            (cx - size * 0.05, cy + size * 0.2),
+            (cx + size * 0.25, cy - size * 0.22),
+        ],
+        fill=(255, 255, 255),
+        width=max(2, size // 8),
+        joint="curve",
+    )
+
+
+def build_background_canvas(avatar_bytes, full_name, username, verified, caption=""):
+    """
+    Monta o fundo estático: avatar + nome + selo + @usuario no topo, e a
+    caixa preta (o LIMITE onde o vídeo será posicionado) logo abaixo.
+    Retorna: (caminho_png, box_x, box_y, box_w, box_h)
+    """
+    canvas = Image.new("RGB", (CANVAS_WIDTH, CANVAS_HEIGHT), BG_COLOR)
+    draw = ImageDraw.Draw(canvas)
+
+    # --- Avatar ---
+    avatar_pasted = False
+    if avatar_bytes:
+        try:
+            avatar = make_circular_avatar(avatar_bytes, AVATAR_SIZE)
+            canvas.paste(avatar, (AVATAR_MARGIN_LEFT, AVATAR_MARGIN_TOP), avatar)
+            avatar_pasted = True
+        except Exception:
+            avatar_pasted = False
+
+    if not avatar_pasted:
+        draw.ellipse(
+            (
+                AVATAR_MARGIN_LEFT,
+                AVATAR_MARGIN_TOP,
+                AVATAR_MARGIN_LEFT + AVATAR_SIZE,
+                AVATAR_MARGIN_TOP + AVATAR_SIZE,
+            ),
+            fill=(210, 210, 210),
+        )
+
+    # --- Nome + selo verificado ---
+    text_x = AVATAR_MARGIN_LEFT + AVATAR_SIZE + 30
+    name_font = load_font(FONT_BOLD_PATH, 46)
+    handle_font = load_font(FONT_REGULAR_PATH, 36)
+
+    name_y = AVATAR_MARGIN_TOP + 2
+    display_name = full_name or username
+    draw.text((text_x, name_y), display_name, font=name_font, fill=TEXT_COLOR)
+
+    if verified:
+        name_w = draw.textlength(display_name, font=name_font)
+        draw_verified_badge(draw, text_x + name_w + 14, name_y + 6, size=36)
+
+    handle_y = name_y + 58
+    draw.text((text_x, handle_y), f"@{username}", font=handle_font, fill=HANDLE_COLOR)
+
+    # --- Legenda opcional (texto extra abaixo do @) ---
+    if caption:
+        cap_font = load_font(FONT_BOLD_PATH, 34)
+        cap_y = handle_y + 70
+        wrapped = textwrap.fill(caption, width=42)
+        draw.multiline_text(
+            (CANVAS_WIDTH / 2, cap_y),
+            wrapped,
+            font=cap_font,
+            fill=TEXT_COLOR,
+            anchor="ma",
+            align="center",
+            spacing=6,
+        )
+
+    # --- Caixa preta = o limite onde o vídeo pode ocupar ---
+    box_x, box_y = 0, HEADER_HEIGHT + BOX_TOP_MARGIN
+    box_w, box_h = CANVAS_WIDTH, BOX_HEIGHT
+    draw.rectangle((box_x, box_y, box_x + box_w, box_y + box_h), fill=BOX_COLOR)
+
+    tmp_path = os.path.join(tempfile.gettempdir(), f"bg_{username}.png")
+    canvas.save(tmp_path)
+    return tmp_path, box_x, box_y, box_w, box_h
+
+
+def compose_video_with_template(video_path, background_png, box_x, box_y, box_w, box_h, output_path):
+    """
+    Usa o FFmpeg para:
+      1) Redimensionar o vídeo original para CABER dentro da caixa (contain
+         fit) sem cortar nada. Se o vídeo for vertical, ele bate no limite
+         de ALTURA da caixa; se for mais horizontal, bate no limite de
+         LARGURA. As sobras continuam pretas (mesma cor da caixa).
+      2) Sobrepor o vídeo redimensionado, centralizado, no fundo estático
+         (avatar + nome + @ + caixa).
+    """
+    filter_complex = (
+        f"[1:v]scale={box_w}:{box_h}:force_original_aspect_ratio=decrease[vid];"
+        f"[0:v][vid]overlay="
+        f"x={box_x}+({box_w}-overlay_w)/2:y={box_y}+({box_h}-overlay_h)/2[outv]"
+    )
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-loop", "1", "-i", background_png,
+        "-i", video_path,
+        "-filter_complex", filter_complex,
+        "-map", "[outv]",
+        "-map", "1:a?",
+        "-c:v", "libx264", "-c:a", "aac",
+        "-pix_fmt", "yuv420p",
+        "-shortest",
+        output_path,
+    ]
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"Erro no FFmpeg: {result.stderr[-800:]}")
+
+
+def fetch_profile_info(client, username):
+    """
+    Busca dados do perfil (foto, nome, verificado) via Apify, com
+    resultsType='details'. Os nomes exatos dos campos podem variar conforme
+    a versão do actor -- por isso tentamos algumas variações comuns.
+    """
+    run_input = {
+        "directUrls": [f"https://www.instagram.com/{username}/"],
+        "resultsType": "details",
+        "resultsLimit": 1,
+    }
+    run = client.actor("apify/instagram-scraper").call(run_input=run_input)
+    dataset_id = run.get("defaultDatasetId") if isinstance(run, dict) else run.default_dataset_id
+    items = client.dataset(dataset_id).list_items().items
+
+    if not items:
+        return {
+            "fullName": username,
+            "username": username,
+            "verified": False,
+            "profilePicUrl": None,
+            "raw": None,
+        }
+
+    profile = items[0]
+    return {
+        "fullName": profile.get("fullName") or profile.get("full_name") or username,
+        "username": profile.get("username") or username,
+        "verified": bool(profile.get("verified") or profile.get("isVerified")),
+        "profilePicUrl": (
+            profile.get("profilePicUrlHD")
+            or profile.get("profilePicUrl")
+            or profile.get("profile_pic_url")
+        ),
+        "raw": profile,
+    }
+
+
+def download_bytes(url, headers, timeout=30):
+    resp = requests.get(url, headers=headers, timeout=timeout)
+    resp.raise_for_status()
+    return resp.content
+
 
 # -----------------------------------------------------------------------------
 # CONEXÃO E AUTENTICAÇÃO COM SUPABASE
@@ -22,7 +240,7 @@ def init_supabase():
         missing_keys.append("SUPABASE_URL")
     if "SUPABASE_KEY" not in st.secrets:
         missing_keys.append("SUPABASE_KEY")
-        
+
     if missing_keys:
         st.error(f"⚠️ As seguintes chaves estão faltando nos Secrets do Streamlit: {', '.join(missing_keys)}")
         return None
@@ -30,14 +248,12 @@ def init_supabase():
     try:
         url = st.secrets["SUPABASE_URL"]
         key = st.secrets["SUPABASE_KEY"]
-        
-        # Parâmetro corrigido para versões recentes da biblioteca supabase (postgrest_client_timeout)
         options = ClientOptions(postgrest_client_timeout=30)
-        
         return create_client(url, key, options=options)
     except Exception as e:
         st.error(f"⚠️ Erro ao inicializar o cliente do Supabase: {e}")
         return None
+
 
 supabase = init_supabase()
 
@@ -48,14 +264,14 @@ if "user" not in st.session_state:
 # TELA DE LOGIN / REGISTRO
 if st.session_state["user"] is None:
     st.title("🔒 Login - Instagram Reels Downloader")
-    
+
     tab1, tab2 = st.tabs(["Entrar", "Criar Conta"])
-    
+
     with tab1:
         st.subheader("Acessar sua conta")
         login_email = st.text_input("E-mail", key="login_email")
         login_password = st.text_input("Senha", type="password", key="login_password")
-        
+
         if st.button("Entrar"):
             if not login_email or not login_password:
                 st.warning("Preencha todos os campos.")
@@ -76,7 +292,7 @@ if st.session_state["user"] is None:
         st.subheader("Criar nova conta")
         signup_email = st.text_input("E-mail", key="signup_email")
         signup_password = st.text_input("Senha", type="password", key="signup_password")
-        
+
         if st.button("Cadastrar"):
             if not signup_email or not signup_password:
                 st.warning("Preencha todos os campos.")
@@ -108,7 +324,15 @@ with st.sidebar:
         st.rerun()
 
 st.title("📥 Instagram Reels Downloader")
-st.write("Digite o @ do perfil do Instagram para baixar os vídeos em lote em um arquivo ZIP.")
+st.write("Digite o @ do perfil do Instagram para baixar os vídeos em lote, já dentro do seu template, em um arquivo ZIP.")
+
+# Verifica se o FFmpeg está disponível no ambiente
+if shutil.which("ffmpeg") is None:
+    st.error(
+        "⚠️ O FFmpeg não foi encontrado no ambiente. Adicione um arquivo "
+        "`packages.txt` na raiz do repositório com a linha `ffmpeg` "
+        "(e reinicie o app) para que a montagem do template funcione."
+    )
 
 # Carrega o Token do Apify a partir dos Secrets
 if "APIFY_TOKEN" not in st.secrets:
@@ -121,6 +345,7 @@ APIFY_TOKEN = st.secrets["APIFY_TOKEN"]
 with st.form("downloader_form"):
     username = st.text_input("Perfil do Instagram (sem @):", placeholder="ex: instagram")
     count = st.number_input("Quantidade de vídeos para buscar:", min_value=1, max_value=20, value=3)
+    caption = st.text_input("Texto extra abaixo do @ (opcional):", placeholder="ex: Confira esse vídeo!")
     submit_button = st.form_submit_button("Buscar e Baixar Reels (ZIP)")
 
 if submit_button:
@@ -128,19 +353,31 @@ if submit_button:
         st.warning("Por favor, digite o nome de usuário do Instagram.")
     else:
         clean_username = username.strip().replace("@", "")
-        
-        with st.spinner(f"Buscando {count} Reels de @{clean_username}..."):
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        }
+
+        with st.spinner(f"Buscando perfil e Reels de @{clean_username}..."):
             try:
                 client = apify_client.ApifyClient(APIFY_TOKEN)
-                
+
+                # 1) Dados do perfil (avatar, nome, verificado)
+                profile_info = fetch_profile_info(client, clean_username)
+
+                avatar_bytes = None
+                if profile_info.get("profilePicUrl"):
+                    try:
+                        avatar_bytes = download_bytes(profile_info["profilePicUrl"], headers)
+                    except Exception as avatar_err:
+                        st.warning(f"Não foi possível baixar a foto de perfil: {avatar_err}")
+
+                # 2) Posts/Reels do perfil
                 run_input = {
                     "directUrls": [f"https://www.instagram.com/{clean_username}/"],
                     "resultsType": "posts",
                     "resultsLimit": count,
                 }
-                
                 run = client.actor("apify/instagram-scraper").call(run_input=run_input)
-                
                 dataset_id = run.get("defaultDatasetId") if isinstance(run, dict) else run.default_dataset_id
                 dataset_items = client.dataset(dataset_id).list_items().items
 
@@ -154,43 +391,63 @@ if submit_button:
                 if not video_urls:
                     st.error("Nenhum vídeo/Reel público encontrado para este perfil.")
                 else:
-                    st.success(f"Encontrados {len(video_urls)} vídeos! Baixando e compactando...")
-                    
-                    progress_bar = st.progress(0)
-                    zip_buffer = io.BytesIO()
-                    
-                    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-                        headers = {
-                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-                        }
-                        
-                        for idx, url in enumerate(video_urls, 1):
-                            try:
-                                response = requests.get(url, headers=headers, timeout=30)
-                                if response.status_code == 200:
-                                    video_filename = f"reel_{clean_username}_{idx}.mp4"
-                                    zip_file.writestr(video_filename, response.content)
-                            except Exception as req_err:
-                                st.warning(f"Não foi possível baixar o vídeo {idx}: {req_err}")
-                            
-                            progress_bar.progress(idx / len(video_urls))
+                    st.success(f"Encontrados {len(video_urls)} vídeos! Montando template e compactando...")
 
-                    zip_buffer.seek(0)
-                    
-                    st.success("ZIP gerado com sucesso!")
-                    
-                    st.download_button(
-                        label="💾 Baixar todos os vídeos (.ZIP)",
-                        data=zip_buffer,
-                        file_name=f"reels_{clean_username}.zip",
-                        mime="application/zip"
+                    # Monta o fundo (avatar + nome + @ + caixa) uma única vez
+                    bg_path, box_x, box_y, box_w, box_h = build_background_canvas(
+                        avatar_bytes,
+                        profile_info.get("fullName"),
+                        profile_info.get("username", clean_username),
+                        profile_info.get("verified", False),
+                        caption.strip() if caption else "",
                     )
 
-                    st.write("---")
-                    st.subheader("Pré-visualização dos vídeos:")
-                    for idx, url in enumerate(video_urls, 1):
-                        st.write(f"**Vídeo {idx}**")
-                        st.video(url)
-                        
+                    st.image(bg_path, caption="Prévia do template (sem vídeo)", width=260)
+
+                    progress_bar = st.progress(0)
+                    zip_buffer = io.BytesIO()
+                    composed_paths = []
+
+                    with tempfile.TemporaryDirectory() as tmp_dir:
+                        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+                            for idx, url in enumerate(video_urls, 1):
+                                try:
+                                    raw_video_path = os.path.join(tmp_dir, f"raw_{idx}.mp4")
+                                    output_video_path = os.path.join(tmp_dir, f"reel_{clean_username}_{idx}.mp4")
+
+                                    video_bytes = download_bytes(url, headers)
+                                    with open(raw_video_path, "wb") as f:
+                                        f.write(video_bytes)
+
+                                    compose_video_with_template(
+                                        raw_video_path, bg_path, box_x, box_y, box_w, box_h, output_video_path
+                                    )
+
+                                    zip_file.write(output_video_path, arcname=os.path.basename(output_video_path))
+                                    composed_paths.append(output_video_path)
+
+                                except Exception as req_err:
+                                    st.warning(f"Não foi possível processar o vídeo {idx}: {req_err}")
+
+                                progress_bar.progress(idx / len(video_urls))
+
+                        zip_buffer.seek(0)
+
+                        st.success("ZIP gerado com sucesso!")
+
+                        st.download_button(
+                            label="💾 Baixar todos os vídeos (.ZIP)",
+                            data=zip_buffer,
+                            file_name=f"reels_{clean_username}.zip",
+                            mime="application/zip"
+                        )
+
+                        st.write("---")
+                        st.subheader("Pré-visualização dos vídeos com template:")
+                        for idx, path in enumerate(composed_paths, 1):
+                            st.write(f"**Vídeo {idx}**")
+                            with open(path, "rb") as vf:
+                                st.video(vf.read())
+
             except Exception as e:
-                st.error(f"Erro ao processar a requisição no Apify: {e}")
+                st.error(f"Erro ao processar a requisição: {e}")
