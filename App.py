@@ -23,7 +23,7 @@ st.set_page_config(
 # -----------------------------------------------------------------------------
 CANVAS_WIDTH = 1080          # Largura final do vídeo gerado
 HEADER_HEIGHT = 340          # Altura da faixa com avatar + nome + @ + legenda
-BOX_TOP_MARGIN = 20          # Espaço entre o header e a caixa do vídeo
+BOX_TOP_MARGIN = 90          # Espaço entre o header e a caixa do vídeo
 BOX_HEIGHT = 1500            # Altura máxima da caixa = o "limite" do vídeo
 BOX_BOTTOM_MARGIN = 60       # Espaço em branco abaixo da caixa (antes faltava)
 CANVAS_HEIGHT = HEADER_HEIGHT + BOX_TOP_MARGIN + BOX_HEIGHT + BOX_BOTTOM_MARGIN
