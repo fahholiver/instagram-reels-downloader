@@ -9,7 +9,7 @@ import tempfile
 import subprocess
 import textwrap
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from supabase import create_client, ClientOptions
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
@@ -273,14 +273,11 @@ def get_ig_login_account(access_token):
     return data
 
 
-def upload_video_to_supabase_storage(supabase_client, local_path, dest_filename, bucket=IG_STORAGE_BUCKET):
+def upload_video_bytes_to_storage(supabase_client, file_bytes, dest_filename, bucket=IG_STORAGE_BUCKET):
     """
-    Sobe o vídeo para um bucket público do Supabase Storage e retorna a URL
-    pública -- a Meta precisa conseguir baixar o vídeo por essa URL.
+    Sobe o vídeo (em bytes) para um bucket público do Supabase Storage e
+    retorna a URL pública -- a Meta precisa conseguir baixar o vídeo por essa URL.
     """
-    with open(local_path, "rb") as f:
-        file_bytes = f.read()
-
     supabase_client.storage.from_(bucket).upload(
         dest_filename,
         file_bytes,
@@ -377,6 +374,29 @@ def update_scheduled_post_status(supabase_client, post_id, status, media_id=None
     if error_message:
         update_data["error_message"] = error_message
     supabase_client.table("scheduled_posts").update(update_data).eq("id", post_id).execute()
+
+
+def gerar_horarios_em_massa(data_inicio, dias_semana_selecionados, horarios_por_dia, quantidade_videos):
+    """
+    Gera uma lista de datetimes para distribuir 'quantidade_videos' vídeos,
+    publicando 'len(horarios_por_dia)' vídeos por dia, só nos dias da semana
+    selecionados (0=Segunda ... 6=Domingo), a partir de 'data_inicio'.
+    """
+    resultado = []
+    dia_atual = data_inicio
+    dias_verificados = 0
+    limite_seguranca = 3650  # ~10 anos, evita loop infinito se nada for selecionado
+
+    while len(resultado) < quantidade_videos and dias_verificados < limite_seguranca:
+        if dia_atual.weekday() in dias_semana_selecionados:
+            for horario in horarios_por_dia:
+                if len(resultado) >= quantidade_videos:
+                    break
+                resultado.append(datetime.combine(dia_atual, horario))
+        dia_atual += timedelta(days=1)
+        dias_verificados += 1
+
+    return resultado
 
 
 # -----------------------------------------------------------------------------
@@ -590,6 +610,7 @@ if submit_button:
                     progress_bar = st.progress(0)
                     zip_buffer = io.BytesIO()
                     composed_paths = []
+                    generated_videos_batch = []  # guardado em session_state pro agendamento em massa
 
                     with tempfile.TemporaryDirectory() as tmp_dir:
                         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
@@ -609,6 +630,12 @@ if submit_button:
                                     zip_file.write(output_video_path, arcname=os.path.basename(output_video_path))
                                     composed_paths.append(output_video_path)
 
+                                    with open(output_video_path, "rb") as composed_f:
+                                        generated_videos_batch.append({
+                                            "filename": os.path.basename(output_video_path),
+                                            "bytes": composed_f.read(),
+                                        })
+
                                 except Exception as req_err:
                                     st.warning(f"Não foi possível processar o vídeo {idx}: {req_err}")
 
@@ -616,7 +643,12 @@ if submit_button:
 
                         zip_buffer.seek(0)
 
-                        st.success("ZIP gerado com sucesso!")
+                        st.session_state["generated_videos"] = generated_videos_batch
+
+                        st.success(
+                            f"ZIP gerado com sucesso! Esses {len(generated_videos_batch)} vídeos também já "
+                            "ficaram disponíveis na Etapa 3 pra agendar direto, sem precisar baixar e reenviar."
+                        )
 
                         st.download_button(
                             label="💾 Baixar todos os vídeos (.ZIP)",
@@ -690,12 +722,10 @@ else:
         else:
             try:
                 with st.spinner("Enviando vídeo para o Storage..."):
-                    tmp_video_path = os.path.join(tempfile.gettempdir(), f"ig_upload_{int(time.time())}.mp4")
-                    with open(tmp_video_path, "wb") as f:
-                        f.write(schedule_video_file.getvalue())
-
                     dest_filename = f"reel_{int(time.time())}.mp4"
-                    public_video_url = upload_video_to_supabase_storage(supabase, tmp_video_path, dest_filename)
+                    public_video_url = upload_video_bytes_to_storage(
+                        supabase, schedule_video_file.getvalue(), dest_filename
+                    )
 
                 if schedule_mode == "Agora":
                     with st.spinner("Publicando no Instagram (isso pode levar até 1-2 minutos)..."):
@@ -707,6 +737,106 @@ else:
 
             except Exception as publish_err:
                 st.error(f"Erro ao publicar/agendar: {publish_err}")
+
+    st.markdown("---")
+    st.subheader("📦 Agendamento em massa")
+    st.caption(
+        "Define quantos vídeos por dia, em quais horários e dias da semana, "
+        "e a partir de quando — o app distribui os vídeos automaticamente nesses slots."
+    )
+
+    # --- Fonte dos vídeos ---
+    videos_gerados_sessao = st.session_state.get("generated_videos", [])
+    usar_gerados = False
+    if videos_gerados_sessao:
+        usar_gerados = st.checkbox(
+            f"Usar os {len(videos_gerados_sessao)} vídeos gerados na Etapa 2 (nesta sessão)",
+            value=True,
+            key="bulk_usar_gerados",
+        )
+    else:
+        st.caption("Nenhum vídeo gerado nesta sessão ainda (gere na Etapa 2 pra aparecer aqui).")
+
+    bulk_uploaded_files = st.file_uploader(
+        "Enviar vídeos manualmente (opcional, pode selecionar vários):",
+        type=["mp4"],
+        accept_multiple_files=True,
+        key="bulk_video_uploader",
+    )
+
+    videos_para_agendar = []
+    if usar_gerados:
+        videos_para_agendar.extend(videos_gerados_sessao)
+    if bulk_uploaded_files:
+        for f in bulk_uploaded_files:
+            videos_para_agendar.append({"filename": f.name, "bytes": f.getvalue()})
+
+    st.info(f"Total de vídeos prontos para agendar: **{len(videos_para_agendar)}**")
+
+    bulk_caption = st.text_area("Legenda (aplicada a todos os vídeos deste lote):", key="bulk_caption_input")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        videos_por_dia = st.number_input("Vídeos por dia:", min_value=1, max_value=10, value=1, key="bulk_videos_por_dia")
+    with col2:
+        data_inicio = st.date_input("A partir de qual data:", key="bulk_data_inicio")
+
+    st.markdown("**Horário de cada vídeo do dia:**")
+    horarios_selecionados = []
+    horario_cols = st.columns(min(int(videos_por_dia), 5) or 1)
+    for i in range(int(videos_por_dia)):
+        with horario_cols[i % len(horario_cols)]:
+            horario = st.time_input(f"Vídeo {i + 1}", key=f"bulk_horario_{i}")
+            horarios_selecionados.append(horario)
+
+    dias_semana_opcoes = {
+        "Segunda": 0, "Terça": 1, "Quarta": 2, "Quinta": 3,
+        "Sexta": 4, "Sábado": 5, "Domingo": 6,
+    }
+    dias_semana_labels = st.multiselect(
+        "Dias da semana em que deve publicar:",
+        options=list(dias_semana_opcoes.keys()),
+        default=["Segunda", "Terça", "Quarta", "Quinta", "Sexta"],
+        key="bulk_dias_semana",
+    )
+    dias_semana_numeros = {dias_semana_opcoes[d] for d in dias_semana_labels}
+
+    if st.button("📅 Gerar agendamento em massa", key="bulk_gerar_button"):
+        if not ig_user_id.strip():
+            st.warning("Preencha a Instagram Business Account ID acima.")
+        elif not videos_para_agendar:
+            st.warning("Nenhum vídeo disponível — gere na Etapa 2 ou envie manualmente acima.")
+        elif not dias_semana_numeros:
+            st.warning("Selecione pelo menos um dia da semana.")
+        elif not supabase:
+            st.error("Conexão com o Supabase não disponível.")
+        else:
+            try:
+                horarios_datas = gerar_horarios_em_massa(
+                    data_inicio, dias_semana_numeros, horarios_selecionados, len(videos_para_agendar)
+                )
+
+                bulk_progress = st.progress(0)
+                criados = 0
+                for idx, (video, quando) in enumerate(zip(videos_para_agendar, horarios_datas), 1):
+                    try:
+                        dest_filename = f"reel_bulk_{int(time.time())}_{idx}.mp4"
+                        public_url = upload_video_bytes_to_storage(supabase, video["bytes"], dest_filename)
+                        create_scheduled_post(
+                            supabase, ig_user_id.strip(), None, public_url, bulk_caption, quando.isoformat()
+                        )
+                        criados += 1
+                    except Exception as bulk_item_err:
+                        st.warning(f"Erro no vídeo {idx} ({video.get('filename', '')}): {bulk_item_err}")
+                    bulk_progress.progress(idx / len(videos_para_agendar))
+
+                st.success(
+                    f"{criados} vídeo(s) agendado(s)! Do dia {horarios_datas[0].strftime('%d/%m/%Y às %H:%M')} "
+                    f"até {horarios_datas[-1].strftime('%d/%m/%Y às %H:%M')}."
+                )
+                st.rerun()
+            except Exception as bulk_err:
+                st.error(f"Erro ao gerar agendamento em massa: {bulk_err}")
 
     st.subheader("📋 Agendamentos pendentes")
     try:
