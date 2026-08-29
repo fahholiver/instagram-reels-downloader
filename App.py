@@ -39,7 +39,7 @@ FONT_REGULAR_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 BG_COLOR = (255, 255, 255)
 TEXT_COLOR = (10, 10, 10)
 HANDLE_COLOR = (100, 100, 100)
-BOX_COLOR = (0, 0, 0)
+BOX_COLOR = (255, 255, 255)   # fundo/limite do vídeo agora é branco (era preto)
 VERIFIED_BLUE = (59, 130, 246)
 
 
@@ -186,44 +186,6 @@ def compose_video_with_template(video_path, background_png, box_x, box_y, box_w,
         raise RuntimeError(f"Erro no FFmpeg: {result.stderr[-800:]}")
 
 
-def fetch_profile_info(client, username):
-    """
-    Busca dados do perfil (foto, nome, verificado) via Apify, com
-    resultsType='details'. Os nomes exatos dos campos podem variar conforme
-    a versão do actor -- por isso tentamos algumas variações comuns.
-    """
-    run_input = {
-        "directUrls": [f"https://www.instagram.com/{username}/"],
-        "resultsType": "details",
-        "resultsLimit": 1,
-    }
-    run = client.actor("apify/instagram-scraper").call(run_input=run_input)
-    dataset_id = run.get("defaultDatasetId") if isinstance(run, dict) else run.default_dataset_id
-    items = client.dataset(dataset_id).list_items().items
-
-    if not items:
-        return {
-            "fullName": username,
-            "username": username,
-            "verified": False,
-            "profilePicUrl": None,
-            "raw": None,
-        }
-
-    profile = items[0]
-    return {
-        "fullName": profile.get("fullName") or profile.get("full_name") or username,
-        "username": profile.get("username") or username,
-        "verified": bool(profile.get("verified") or profile.get("isVerified")),
-        "profilePicUrl": (
-            profile.get("profilePicUrlHD")
-            or profile.get("profilePicUrl")
-            or profile.get("profile_pic_url")
-        ),
-        "raw": profile,
-    }
-
-
 def download_bytes(url, headers, timeout=30):
     resp = requests.get(url, headers=headers, timeout=timeout)
     resp.raise_for_status()
@@ -343,9 +305,17 @@ APIFY_TOKEN = st.secrets["APIFY_TOKEN"]
 
 # Formulário de Download
 with st.form("downloader_form"):
-    username = st.text_input("Perfil do Instagram (sem @):", placeholder="ex: instagram")
+    username = st.text_input("Perfil do Instagram (sem @) — usado para buscar os vídeos:", placeholder="ex: instagram")
     count = st.number_input("Quantidade de vídeos para buscar:", min_value=1, max_value=20, value=3)
+
+    st.markdown("---")
+    st.markdown("**Dados do template** (preenchidos manualmente, não vêm da busca)")
+    avatar_file = st.file_uploader("Foto de perfil para o template (opcional):", type=["png", "jpg", "jpeg"])
+    display_name = st.text_input("Nome a exibir no template:", placeholder="ex: Usuário Aqui")
+    display_handle = st.text_input("Usuário a exibir (sem @):", placeholder="ex: arrobaaqui")
+    verified = st.checkbox("Mostrar selo de verificado", value=False)
     caption = st.text_input("Texto extra abaixo do @ (opcional):", placeholder="ex: Confira esse vídeo!")
+
     submit_button = st.form_submit_button("Buscar e Baixar Reels (ZIP)")
 
 if submit_button:
@@ -357,21 +327,16 @@ if submit_button:
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         }
 
-        with st.spinner(f"Buscando perfil e Reels de @{clean_username}..."):
+        # Dados do template vêm direto do formulário (sem busca no Apify)
+        avatar_bytes = avatar_file.read() if avatar_file is not None else None
+        template_name = display_name.strip() if display_name and display_name.strip() else clean_username
+        template_handle = (display_handle.strip().replace("@", "") if display_handle and display_handle.strip() else clean_username)
+
+        with st.spinner(f"Buscando Reels de @{clean_username}..."):
             try:
                 client = apify_client.ApifyClient(APIFY_TOKEN)
 
-                # 1) Dados do perfil (avatar, nome, verificado)
-                profile_info = fetch_profile_info(client, clean_username)
-
-                avatar_bytes = None
-                if profile_info.get("profilePicUrl"):
-                    try:
-                        avatar_bytes = download_bytes(profile_info["profilePicUrl"], headers)
-                    except Exception as avatar_err:
-                        st.warning(f"Não foi possível baixar a foto de perfil: {avatar_err}")
-
-                # 2) Posts/Reels do perfil
+                # Posts/Reels do perfil
                 run_input = {
                     "directUrls": [f"https://www.instagram.com/{clean_username}/"],
                     "resultsType": "posts",
@@ -396,9 +361,9 @@ if submit_button:
                     # Monta o fundo (avatar + nome + @ + caixa) uma única vez
                     bg_path, box_x, box_y, box_w, box_h = build_background_canvas(
                         avatar_bytes,
-                        profile_info.get("fullName"),
-                        profile_info.get("username", clean_username),
-                        profile_info.get("verified", False),
+                        template_name,
+                        template_handle,
+                        verified,
                         caption.strip() if caption else "",
                     )
 
