@@ -5,3 +5,4 @@ supabase
 stripe
 apify-client
 Pillow
+streamlit-cropper
