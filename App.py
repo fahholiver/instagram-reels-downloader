@@ -21,6 +21,7 @@ from ig_publisher import (
     publish_container,
     publish_reel_now,
 )
+from translations import t
 
 # Configuração da página
 st.set_page_config(
@@ -28,6 +29,21 @@ st.set_page_config(
     page_icon="📥",
     layout="centered"
 )
+
+# -----------------------------------------------------------------------------
+# SELETOR DE IDIOMA (fica visível em qualquer tela, inclusive antes do login)
+# -----------------------------------------------------------------------------
+if "lang" not in st.session_state:
+    st.session_state["lang"] = "en"  # padrão inglês (uso no Reino Unido)
+
+with st.sidebar:
+    lang_choice = st.selectbox(
+        "🌐 Language / Idioma",
+        ["English", "Português (Brasil)"],
+        index=0 if st.session_state["lang"] == "en" else 1,
+        key="lang_selector",
+    )
+    st.session_state["lang"] = "en" if lang_choice == "English" else "pt"
 
 # -----------------------------------------------------------------------------
 # CONFIGURAÇÃO DO TEMPLATE (ajuste estes valores para mudar o layout)
@@ -170,7 +186,7 @@ def build_background_canvas(avatar_bytes, full_name, username, verified, caption
             avatar_pasted = True
         except Exception as avatar_err:
             avatar_pasted = False
-            st.warning(f"Não foi possível usar a foto de perfil no template: {avatar_err}")
+            st.warning(t("avatar_use_error", error=avatar_err))
 
     if not avatar_pasted:
         draw.ellipse(
@@ -378,7 +394,7 @@ def init_supabase():
         missing_keys.append("SUPABASE_KEY")
 
     if missing_keys:
-        st.error(f"⚠️ As seguintes chaves estão faltando nos Secrets do Streamlit: {', '.join(missing_keys)}")
+        st.error(t("missing_secrets_error", keys=', '.join(missing_keys)))
         return None
 
     try:
@@ -387,7 +403,7 @@ def init_supabase():
         options = ClientOptions(postgrest_client_timeout=30)
         return create_client(url, key, options=options)
     except Exception as e:
-        st.error(f"⚠️ Erro ao inicializar o cliente do Supabase: {e}")
+        st.error(t("supabase_init_error", error=e))
         return None
 
 
@@ -399,18 +415,18 @@ if "user" not in st.session_state:
 
 # TELA DE LOGIN / REGISTRO
 if st.session_state["user"] is None:
-    st.title("🔒 Login - Instagram Reels Downloader")
+    st.title(t("login_page_title"))
 
-    tab1, tab2 = st.tabs(["Entrar", "Criar Conta"])
+    tab1, tab2 = st.tabs([t("tab_login"), t("tab_signup")])
 
     with tab1:
-        st.subheader("Acessar sua conta")
-        login_email = st.text_input("E-mail", key="login_email")
-        login_password = st.text_input("Senha", type="password", key="login_password")
+        st.subheader(t("login_subheader"))
+        login_email = st.text_input(t("email_label"), key="login_email")
+        login_password = st.text_input(t("password_label"), type="password", key="login_password")
 
-        if st.button("Entrar"):
+        if st.button(t("login_button")):
             if not login_email or not login_password:
-                st.warning("Preencha todos os campos.")
+                st.warning(t("fill_all_fields"))
             elif supabase:
                 try:
                     res = supabase.auth.sign_in_with_password({
@@ -419,19 +435,19 @@ if st.session_state["user"] is None:
                     })
                     if res.user:
                         st.session_state["user"] = res.user
-                        st.success("Login realizado com sucesso!")
+                        st.success(t("login_success"))
                         st.rerun()
                 except Exception as e:
-                    st.error(f"Erro no login: {e}")
+                    st.error(t("login_error", error=e))
 
     with tab2:
-        st.subheader("Criar nova conta")
-        signup_email = st.text_input("E-mail", key="signup_email")
-        signup_password = st.text_input("Senha", type="password", key="signup_password")
+        st.subheader(t("signup_subheader"))
+        signup_email = st.text_input(t("email_label"), key="signup_email")
+        signup_password = st.text_input(t("password_label"), type="password", key="signup_password")
 
-        if st.button("Cadastrar"):
+        if st.button(t("signup_button")):
             if not signup_email or not signup_password:
-                st.warning("Preencha todos os campos.")
+                st.warning(t("fill_all_fields"))
             elif supabase:
                 try:
                     res = supabase.auth.sign_up({
@@ -439,9 +455,9 @@ if st.session_state["user"] is None:
                         "password": signup_password.strip()
                     })
                     if res.user:
-                        st.success("Conta criada com sucesso! Faça login para continuar.")
+                        st.success(t("signup_success"))
                 except Exception as e:
-                    st.error(f"Erro ao cadastrar: {e}")
+                    st.error(t("signup_error", error=e))
 
     st.stop()
 
@@ -449,8 +465,8 @@ if st.session_state["user"] is None:
 # PAINEL PRINCIPAL (APÓS LOGIN)
 # -----------------------------------------------------------------------------
 with st.sidebar:
-    st.write(f"👤 Logado como: **{st.session_state['user'].email}**")
-    if st.button("Sair (Logout)"):
+    st.write(t("logged_in_as", email=st.session_state['user'].email))
+    if st.button(t("logout_button")):
         if supabase:
             try:
                 supabase.auth.sign_out()
@@ -459,53 +475,49 @@ with st.sidebar:
         st.session_state["user"] = None
         st.rerun()
 
-st.title("📥 Instagram Reels Downloader")
-st.write("Monte seu template, veja a prévia, depois busque os Reels e baixe tudo já pronto em um ZIP.")
+st.title(t("app_title"))
+st.write(t("app_subtitle"))
 
 # Verifica se o FFmpeg está disponível no ambiente
 if shutil.which("ffmpeg") is None:
-    st.error(
-        "⚠️ O FFmpeg não foi encontrado no ambiente. Adicione um arquivo "
-        "`packages.txt` na raiz do repositório com a linha `ffmpeg` "
-        "(e reinicie o app) para que a montagem do template funcione."
-    )
+    st.error(t("ffmpeg_missing"))
 
 # -----------------------------------------------------------------------------
 # ETAPA 1 — MONTAR E PRÉ-VISUALIZAR O TEMPLATE
 # -----------------------------------------------------------------------------
-st.header("1️⃣ Monte seu template")
+st.header(t("step1_header"))
 
-avatar_file = st.file_uploader("Foto de perfil (opcional):", type=["png", "jpg", "jpeg"], key="avatar_uploader")
+avatar_file = st.file_uploader(t("avatar_uploader_label"), type=["png", "jpg", "jpeg"], key="avatar_uploader")
 
 avatar_data = None
 if avatar_file is not None:
     try:
         original_img = Image.open(avatar_file).convert("RGB")
-        st.image(original_img, caption="Foto enviada", width=150)
+        st.image(original_img, caption=t("uploaded_photo_caption"), width=150)
 
-        zoom = st.slider("Zoom da foto:", min_value=1.0, max_value=3.0, value=1.0, step=0.05, key="avatar_zoom")
-        pos_x = st.slider("Posição horizontal:", min_value=0, max_value=100, value=50, key="avatar_pos_x")
-        pos_y = st.slider("Posição vertical:", min_value=0, max_value=100, value=50, key="avatar_pos_y")
+        zoom = st.slider(t("zoom_slider_label"), min_value=1.0, max_value=3.0, value=1.0, step=0.05, key="avatar_zoom")
+        pos_x = st.slider(t("pos_x_slider_label"), min_value=0, max_value=100, value=50, key="avatar_pos_x")
+        pos_y = st.slider(t("pos_y_slider_label"), min_value=0, max_value=100, value=50, key="avatar_pos_y")
 
         avatar_data = crop_avatar_region(original_img, zoom, pos_x, pos_y)
 
         preview_avatar = make_circular_avatar(avatar_data, 150)
-        st.image(preview_avatar, caption="Prévia do avatar recortado")
+        st.image(preview_avatar, caption=t("avatar_preview_caption"))
     except Exception as upload_err:
-        st.error(f"Não foi possível processar a imagem enviada: {upload_err}")
+        st.error(t("avatar_process_error", error=upload_err))
         avatar_data = None
 
 col1, col2 = st.columns(2)
 with col1:
-    display_name = st.text_input("Nome a exibir no template:", placeholder="ex: Usuário Aqui", key="tpl_name")
-    verified = st.checkbox("Mostrar selo de verificado", value=False, key="tpl_verified")
+    display_name = st.text_input(t("display_name_label"), placeholder=t("display_name_placeholder"), key="tpl_name")
+    verified = st.checkbox(t("verified_checkbox_label"), value=False, key="tpl_verified")
 with col2:
-    display_handle = st.text_input("Usuário a exibir (sem @):", placeholder="ex: arrobaaqui", key="tpl_handle")
+    display_handle = st.text_input(t("display_handle_label"), placeholder=t("display_handle_placeholder"), key="tpl_handle")
 
-caption = st.text_input("Texto extra abaixo do @ (opcional):", placeholder="ex: Confira esse vídeo!", key="tpl_caption")
+caption = st.text_input(t("caption_input_label"), placeholder=t("caption_input_placeholder"), key="tpl_caption")
 
-template_name = display_name.strip() if display_name.strip() else "Usuário Aqui"
-template_handle = display_handle.strip().replace("@", "") if display_handle.strip() else "arrobaaqui"
+template_name = display_name.strip() if display_name.strip() else t("default_display_name")
+template_handle = display_handle.strip().replace("@", "") if display_handle.strip() else t("default_display_handle")
 
 bg_path, box_x, box_y, box_w, box_h = build_background_canvas(
     avatar_data,
@@ -515,47 +527,47 @@ bg_path, box_x, box_y, box_w, box_h = build_background_canvas(
     caption.strip() if caption else "",
 )
 
-st.subheader("Prévia do template")
-st.image(bg_path, caption="A área branca abaixo do header é o limite onde o vídeo vai entrar", width=320)
+st.subheader(t("template_preview_subheader"))
+st.image(bg_path, caption=t("template_preview_caption"), width=320)
 
 st.markdown("---")
 
 # -----------------------------------------------------------------------------
 # ETAPA 2 — BUSCAR VÍDEOS E BAIXAR
 # -----------------------------------------------------------------------------
-st.header("2️⃣ Buscar vídeos e baixar")
+st.header(t("step2_header"))
 
 # Carrega o Token do Apify a partir dos Secrets
 if "APIFY_TOKEN" not in st.secrets:
-    st.error("⚠️ A chave APIFY_TOKEN não foi configurada nos Secrets do Streamlit.")
+    st.error(t("apify_token_missing"))
     st.stop()
 
 APIFY_TOKEN = st.secrets["APIFY_TOKEN"]
 
 with st.form("downloader_form"):
-    username = st.text_input("Perfil do Instagram (sem @) — usado para buscar os vídeos:", placeholder="ex: instagram")
-    count = st.number_input("Quantidade de vídeos para buscar:", min_value=1, max_value=20, value=3)
+    username = st.text_input(t("username_field_label"), placeholder=t("username_field_placeholder"))
+    count = st.number_input(t("count_field_label"), min_value=1, max_value=20, value=3)
     ordenar_por = st.radio(
-        "Buscar quais vídeos?",
-        ["Mais recentes", "Mais virais (visualizações + curtidas + comentários)"],
+        t("order_by_label"),
+        [t("order_by_recent"), t("order_by_viral")],
         key="ordenar_por_input",
     )
-    submit_button = st.form_submit_button("Buscar e Baixar Reels (ZIP)")
+    submit_button = st.form_submit_button(t("fetch_button"))
 
 if submit_button:
     if not username.strip():
-        st.warning("Por favor, digite o nome de usuário do Instagram.")
+        st.warning(t("enter_username_warning"))
     else:
         clean_username = username.strip().replace("@", "")
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         }
 
-        with st.spinner(f"Buscando Reels de @{clean_username}..."):
+        with st.spinner(t("fetching_spinner", username=clean_username)):
             try:
                 client = apify_client.ApifyClient(APIFY_TOKEN)
 
-                buscar_virais = ordenar_por.startswith("Mais virais")
+                buscar_virais = ordenar_por == t("order_by_viral")
                 # Pra achar os "mais virais" precisamos olhar mais posts do que o pedido
                 # e escolher os melhores depois -- senão só teria os N mais recentes pra escolher.
                 pool_size = min(int(count) * 5, 100) if buscar_virais else int(count)
@@ -591,9 +603,9 @@ if submit_button:
                 video_urls = [item.get("videoUrl") for item in video_items]
 
                 if not video_urls:
-                    st.error("Nenhum vídeo/Reel público encontrado para este perfil.")
+                    st.error(t("no_videos_found_error"))
                 else:
-                    st.success(f"Encontrados {len(video_urls)} vídeos! Aplicando o template e compactando...")
+                    st.success(t("videos_found_success", count=len(video_urls)))
 
                     # Reutiliza o template (bg_path, box_x/y/w/h) já montado na Etapa 1
 
@@ -627,7 +639,7 @@ if submit_button:
                                         })
 
                                 except Exception as req_err:
-                                    st.warning(f"Não foi possível processar o vídeo {idx}: {req_err}")
+                                    st.warning(t("video_process_warning", index=idx, error=req_err))
 
                                 progress_bar.progress(idx / len(video_urls))
 
@@ -635,149 +647,134 @@ if submit_button:
 
                         st.session_state["generated_videos"] = generated_videos_batch
 
-                        st.success(
-                            f"ZIP gerado com sucesso! Esses {len(generated_videos_batch)} vídeos também já "
-                            "ficaram disponíveis na Etapa 3 pra agendar direto, sem precisar baixar e reenviar."
-                        )
+                        st.success(t("zip_success", count=len(generated_videos_batch)))
 
                         st.download_button(
-                            label="💾 Baixar todos os vídeos (.ZIP)",
+                            label=t("download_zip_button"),
                             data=zip_buffer,
                             file_name=f"reels_{clean_username}.zip",
                             mime="application/zip"
                         )
 
                         st.write("---")
-                        st.subheader("Pré-visualização dos vídeos com template:")
+                        st.subheader(t("video_preview_subheader"))
                         for idx, path in enumerate(composed_paths, 1):
-                            st.write(f"**Vídeo {idx}**")
+                            st.write(t("video_label", index=idx))
                             with open(path, "rb") as vf:
                                 st.video(vf.read())
 
             except Exception as e:
-                st.error(f"Erro ao processar a requisição: {e}")
+                st.error(t("request_error", error=e))
 
 st.markdown("---")
 
 # -----------------------------------------------------------------------------
 # ETAPA 3 — AGENDAR / PUBLICAR NO INSTAGRAM (uso pessoal, modo teste)
 # -----------------------------------------------------------------------------
-st.header("3️⃣ Agendar/Publicar no Instagram (uso pessoal)")
+st.header(t("step3_header"))
 
 IG_SCHEDULING_ENABLED = st.secrets.get("IG_SCHEDULING_ENABLED", False)
 
 if not IG_SCHEDULING_ENABLED:
-    st.warning(
-        "🔒 Publicação/agendamento automático está **desativado por enquanto** "
-        "(pra evitar risco de bloqueio de conta enquanto isso é testado com calma). "
-        "O código continua todo aqui, só não roda. Pra reativar quando quiser testar de "
-        "novo: adicione o secret `IG_SCHEDULING_ENABLED = \"true\"` nas configurações do Streamlit "
-        "e não esqueça de reativar o workflow no GitHub Actions também."
-    )
+    st.warning(t("scheduling_disabled_warning"))
     st.stop()
 
 current_user_id = st.session_state["user"].id
 
 # --- Conectar uma conta do Instagram a ESTE login ---
-with st.expander("➕ Conectar uma conta do Instagram"):
-    st.caption(
-        "Cole um token gerado no Graph API Explorer (Meta for Developers) pra essa conta. "
-        "Ele fica salvo só pro seu login -- outros usuários do app não veem nem usam essa conta."
-    )
-    novo_token = st.text_input("Token de acesso (IGAA...):", type="password", key="novo_ig_token")
-    if st.button("Conectar conta", key="conectar_ig_button"):
+with st.expander(t("connect_account_expander")):
+    st.caption(t("connect_account_caption"))
+    novo_token = st.text_input(t("token_input_label"), type="password", key="novo_ig_token")
+    if st.button(t("connect_account_button"), key="conectar_ig_button"):
         if not novo_token.strip():
-            st.warning("Cole o token antes de conectar.")
+            st.warning(t("paste_token_warning"))
         else:
             try:
                 account_info = get_ig_login_account(novo_token.strip())
                 save_ig_account(supabase, current_user_id, account_info, novo_token.strip())
-                st.success(f"Conta @{account_info['username']} conectada!")
+                st.success(t("account_connected_success", username=account_info['username']))
                 st.rerun()
             except Exception as connect_err:
-                st.error(f"Erro ao conectar: {connect_err}")
+                st.error(t("connect_error", error=connect_err))
 
 # --- Dropdown com as contas JÁ conectadas por esse usuário ---
 minhas_contas = list_ig_accounts(supabase, current_user_id) if supabase else []
 
 if not minhas_contas:
-    st.info("Nenhuma conta conectada ainda. Use o \"➕ Conectar uma conta do Instagram\" acima pra começar.")
+    st.info(t("no_accounts_info"))
     st.stop()
 
 opcoes_contas = {f"@{acc['username']}": acc for acc in minhas_contas}
-conta_selecionada_label = st.selectbox("Conta do Instagram para postar:", options=list(opcoes_contas.keys()), key="conta_ig_selecionada")
+conta_selecionada_label = st.selectbox(t("select_account_label"), options=list(opcoes_contas.keys()), key="conta_ig_selecionada")
 conta_selecionada = opcoes_contas[conta_selecionada_label]
 ig_user_id = conta_selecionada["ig_user_id"]
 IG_ACCESS_TOKEN = conta_selecionada["access_token"]
 
-st.subheader("Publicar um vídeo")
-schedule_video_file = st.file_uploader("Vídeo (.mp4) já com o template aplicado:", type=["mp4"], key="ig_video_uploader")
-ig_caption = st.text_area("Legenda do Reels:", key="ig_caption_input")
-schedule_mode = st.radio("Quando publicar?", ["Agora", "Agendar para depois"], key="ig_schedule_mode")
+st.subheader(t("publish_video_subheader"))
+schedule_video_file = st.file_uploader(t("video_uploader_label"), type=["mp4"], key="ig_video_uploader")
+ig_caption = st.text_area(t("reel_caption_label"), key="ig_caption_input")
+schedule_mode = st.radio(t("when_to_publish_label"), [t("publish_now_option"), t("schedule_later_option")], key="ig_schedule_mode")
 
 scheduled_datetime_iso = None
-if schedule_mode == "Agendar para depois":
+if schedule_mode == t("schedule_later_option"):
     col_a, col_b = st.columns(2)
     with col_a:
-        schedule_date = st.date_input("Data:", key="ig_schedule_date")
+        schedule_date = st.date_input(t("date_label"), key="ig_schedule_date")
     with col_b:
-        schedule_time_input = st.time_input("Hora:", key="ig_schedule_time")
+        schedule_time_input = st.time_input(t("time_label"), key="ig_schedule_time")
     scheduled_dt = aplicar_jitter(datetime.combine(schedule_date, schedule_time_input))
     scheduled_datetime_iso = scheduled_dt.isoformat()
-    st.caption("O horário real de publicação varia até 10 minutos pra mais ou pra menos (evita parecer bot).")
+    st.caption(t("jitter_caption"))
 
-if st.button("Confirmar", key="ig_confirm_button"):
+if st.button(t("confirm_button"), key="ig_confirm_button"):
     if schedule_video_file is None:
-        st.warning("Envie o vídeo que deseja publicar.")
+        st.warning(t("upload_video_warning"))
     elif not supabase:
-        st.error("Conexão com o Supabase não disponível — não dá pra guardar o vídeo.")
+        st.error(t("supabase_unavailable_error"))
     else:
         try:
-            with st.spinner("Enviando vídeo para o Storage..."):
+            with st.spinner(t("uploading_spinner")):
                 dest_filename = f"reel_{int(time.time())}.mp4"
                 public_video_url = upload_video_bytes_to_storage(
                     supabase, schedule_video_file.getvalue(), dest_filename
                 )
 
-            if schedule_mode == "Agora":
-                with st.spinner("Publicando no Instagram (isso pode levar até 1-2 minutos)..."):
+            if schedule_mode == t("publish_now_option"):
+                with st.spinner(t("publishing_spinner")):
                     media_id = publish_reel_now(ig_user_id, public_video_url, ig_caption, IG_ACCESS_TOKEN)
                 try:
                     supabase.storage.from_(IG_STORAGE_BUCKET).remove([dest_filename])
                 except Exception:
                     pass  # publicação já deu certo, falha ao limpar não é crítica
-                st.success(f"Publicado com sucesso! ID da publicação: `{media_id}`")
+                st.success(t("published_success", media_id=media_id))
             else:
                 create_scheduled_post(
                     supabase, current_user_id, ig_user_id, IG_ACCESS_TOKEN, public_video_url, ig_caption,
                     scheduled_datetime_iso, storage_path=dest_filename,
                 )
-                st.success(f"Agendado para perto de {scheduled_dt.strftime('%d/%m/%Y às %H:%M')}!")
+                st.success(t("scheduled_success", datetime=scheduled_dt.strftime('%d/%m/%Y %H:%M')))
 
         except Exception as publish_err:
-            st.error(f"Erro ao publicar/agendar: {publish_err}")
+            st.error(t("publish_schedule_error", error=publish_err))
 
 st.markdown("---")
-st.subheader("📦 Agendamento em massa")
-st.caption(
-    "Define quantos vídeos por dia, em quais horários e dias da semana, "
-    "e a partir de quando — o app distribui os vídeos automaticamente nesses slots."
-)
+st.subheader(t("bulk_subheader"))
+st.caption(t("bulk_caption_intro"))
 
 # --- Fonte dos vídeos ---
 videos_gerados_sessao = st.session_state.get("generated_videos", [])
 usar_gerados = False
 if videos_gerados_sessao:
     usar_gerados = st.checkbox(
-        f"Usar os {len(videos_gerados_sessao)} vídeos gerados na Etapa 2 (nesta sessão)",
+        t("use_generated_checkbox", count=len(videos_gerados_sessao)),
         value=True,
         key="bulk_usar_gerados",
     )
 else:
-    st.caption("Nenhum vídeo gerado nesta sessão ainda (gere na Etapa 2 pra aparecer aqui).")
+    st.caption(t("no_generated_videos_caption"))
 
 bulk_uploaded_files = st.file_uploader(
-    "Enviar vídeos manualmente (opcional, pode selecionar vários):",
+    t("bulk_uploader_label"),
     type=["mp4"],
     accept_multiple_files=True,
     key="bulk_video_uploader",
@@ -790,43 +787,43 @@ if bulk_uploaded_files:
     for f in bulk_uploaded_files:
         videos_para_agendar.append({"filename": f.name, "bytes": f.getvalue()})
 
-st.info(f"Total de vídeos prontos para agendar: **{len(videos_para_agendar)}**")
+st.info(t("total_videos_ready_info", count=len(videos_para_agendar)))
 
-bulk_caption = st.text_area("Legenda (aplicada a todos os vídeos deste lote):", key="bulk_caption_input")
+bulk_caption = st.text_area(t("bulk_caption_label"), key="bulk_caption_input")
 
 col1, col2 = st.columns(2)
 with col1:
-    videos_por_dia = st.number_input("Vídeos por dia:", min_value=1, max_value=10, value=1, key="bulk_videos_por_dia")
+    videos_por_dia = st.number_input(t("videos_per_day_label"), min_value=1, max_value=10, value=1, key="bulk_videos_por_dia")
 with col2:
-    data_inicio = st.date_input("A partir de qual data:", key="bulk_data_inicio")
+    data_inicio = st.date_input(t("start_date_label"), key="bulk_data_inicio")
 
-st.markdown("**Horário de cada vídeo do dia:**")
+st.markdown(t("time_per_video_markdown"))
 horarios_selecionados = []
 horario_cols = st.columns(min(int(videos_por_dia), 5) or 1)
 for i in range(int(videos_por_dia)):
     with horario_cols[i % len(horario_cols)]:
-        horario = st.time_input(f"Vídeo {i + 1}", key=f"bulk_horario_{i}")
+        horario = st.time_input(t("video_slot_label", index=i + 1), key=f"bulk_horario_{i}")
         horarios_selecionados.append(horario)
 
 dias_semana_opcoes = {
-    "Segunda": 0, "Terça": 1, "Quarta": 2, "Quinta": 3,
-    "Sexta": 4, "Sábado": 5, "Domingo": 6,
+    t("weekday_monday"): 0, t("weekday_tuesday"): 1, t("weekday_wednesday"): 2, t("weekday_thursday"): 3,
+    t("weekday_friday"): 4, t("weekday_saturday"): 5, t("weekday_sunday"): 6,
 }
 dias_semana_labels = st.multiselect(
-    "Dias da semana em que deve publicar:",
+    t("weekdays_label"),
     options=list(dias_semana_opcoes.keys()),
-    default=["Segunda", "Terça", "Quarta", "Quinta", "Sexta"],
+    default=[t("weekday_monday"), t("weekday_tuesday"), t("weekday_wednesday"), t("weekday_thursday"), t("weekday_friday")],
     key="bulk_dias_semana",
 )
 dias_semana_numeros = {dias_semana_opcoes[d] for d in dias_semana_labels}
 
-if st.button("📅 Gerar agendamento em massa", key="bulk_gerar_button"):
+if st.button(t("generate_bulk_button"), key="bulk_gerar_button"):
     if not videos_para_agendar:
-        st.warning("Nenhum vídeo disponível — gere na Etapa 2 ou envie manualmente acima.")
+        st.warning(t("no_videos_available_warning"))
     elif not dias_semana_numeros:
-        st.warning("Selecione pelo menos um dia da semana.")
+        st.warning(t("select_weekday_warning"))
     elif not supabase:
-        st.error("Conexão com o Supabase não disponível.")
+        st.error(t("supabase_unavailable_error_plain"))
     else:
         try:
             horarios_datas = gerar_horarios_em_massa(
@@ -845,27 +842,29 @@ if st.button("📅 Gerar agendamento em massa", key="bulk_gerar_button"):
                     )
                     criados += 1
                 except Exception as bulk_item_err:
-                    st.warning(f"Erro no vídeo {idx} ({video.get('filename', '')}): {bulk_item_err}")
+                    st.warning(t("bulk_item_error", index=idx, filename=video.get('filename', ''), error=bulk_item_err))
                 bulk_progress.progress(idx / len(videos_para_agendar))
 
-            st.success(
-                f"{criados} vídeo(s) agendado(s)! Do dia {horarios_datas[0].strftime('%d/%m/%Y às %H:%M')} "
-                f"até {horarios_datas[-1].strftime('%d/%m/%Y às %H:%M')}."
-            )
+            st.success(t(
+                "bulk_success",
+                count=criados,
+                first=horarios_datas[0].strftime('%d/%m/%Y %H:%M'),
+                last=horarios_datas[-1].strftime('%d/%m/%Y %H:%M'),
+            ))
             st.rerun()
         except Exception as bulk_err:
-            st.error(f"Erro ao gerar agendamento em massa: {bulk_err}")
+            st.error(t("bulk_error", error=bulk_err))
 
-st.subheader("📋 Agendamentos pendentes (dessa conta que você está logado)")
+st.subheader(t("pending_subheader"))
 try:
     pending_posts = list_scheduled_posts(supabase, current_user_id, status="pending") if supabase else []
     if not pending_posts:
-        st.caption("Nenhum agendamento pendente.")
+        st.caption(t("no_pending_caption"))
     else:
         for post in pending_posts:
-            st.write(f"🕒 **{post['scheduled_time']}** — {post.get('caption', '')[:60] or '(sem legenda)'}")
+            st.write(t("pending_item_label", time=post['scheduled_time'], caption=post.get('caption', '')[:60] or t("no_caption_placeholder")))
 
-        if st.button("🔄 Verificar e publicar agendados que já venceram (backup manual, o cron faz isso sozinho)"):
+        if st.button(t("check_pending_button")):
             now_iso = datetime.now().isoformat()
             published_count = 0
             for post in pending_posts:
@@ -883,12 +882,12 @@ try:
                         published_count += 1
                     except Exception as auto_publish_err:
                         update_scheduled_post_status(supabase, post["id"], "error", error_message=str(auto_publish_err))
-                        st.error(f"Erro ao publicar agendamento {post['id']}: {auto_publish_err}")
+                        st.error(t("auto_publish_error", id=post['id'], error=auto_publish_err))
 
             if published_count:
-                st.success(f"{published_count} vídeo(s) publicado(s)!")
+                st.success(t("published_count_success", count=published_count))
                 st.rerun()
             else:
-                st.info("Nenhum agendamento estava vencido ainda.")
+                st.info(t("no_due_schedules_info"))
 except Exception as list_err:
-    st.error(f"Erro ao listar agendamentos: {list_err}")
+    st.error(t("list_schedules_error", error=list_err))
