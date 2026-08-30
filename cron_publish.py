@@ -4,13 +4,16 @@ Supabase e publica no Instagram tudo que já venceu. Feito para ser chamado
 periodicamente por um agendador externo (GitHub Actions, por exemplo) --
 Streamlit sozinho não consegue rodar tarefas em segundo plano de forma confiável.
 
+Cada linha da tabela já guarda o próprio access_token (snapshot de quando foi
+agendado) -- isso é o que permite vários usuários/contas diferentes conviverem
+na mesma tabela, cada um com o token da conta que ele mesmo conectou.
+
 Depois de publicar com sucesso, o vídeo é apagado do Supabase Storage (não
 faz sentido manter o arquivo depois de já ter ido pro Instagram).
 
 Variáveis de ambiente necessárias:
   SUPABASE_URL
   SUPABASE_KEY
-  IG_ACCESS_TOKEN
   IG_STORAGE_BUCKET   (opcional, default "reels-videos")
 """
 import os
@@ -26,10 +29,9 @@ IG_STORAGE_BUCKET = os.environ.get("IG_STORAGE_BUCKET", "reels-videos")
 def main():
     supabase_url = os.environ.get("SUPABASE_URL")
     supabase_key = os.environ.get("SUPABASE_KEY")
-    ig_access_token = os.environ.get("IG_ACCESS_TOKEN")
 
-    if not all([supabase_url, supabase_key, ig_access_token]):
-        print("ERRO: faltam variáveis de ambiente (SUPABASE_URL, SUPABASE_KEY, IG_ACCESS_TOKEN).")
+    if not all([supabase_url, supabase_key]):
+        print("ERRO: faltam variáveis de ambiente (SUPABASE_URL, SUPABASE_KEY).")
         sys.exit(1)
 
     supabase = create_client(supabase_url, supabase_key)
@@ -53,9 +55,19 @@ def main():
 
     for post in pending:
         post_id = post["id"]
+        access_token = post.get("access_token")
+
+        if not access_token:
+            supabase.table("scheduled_posts").update({
+                "status": "error",
+                "error_message": "Post sem access_token salvo (agendado antes da migração de contas por usuário?).",
+            }).eq("id", post_id).execute()
+            print(f"  ✖ Post {post_id} sem access_token -- pulado.")
+            continue
+
         try:
             media_id = publish_reel_now(
-                post["ig_id"], post["video_url"], post.get("caption", ""), ig_access_token
+                post["ig_id"], post["video_url"], post.get("caption", ""), access_token
             )
 
             supabase.table("scheduled_posts").update({
