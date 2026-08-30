@@ -275,10 +275,37 @@ def upload_video_bytes_to_storage(supabase_client, file_bytes, dest_filename, bu
     return public_url
 
 
-def create_scheduled_post(supabase_client, ig_id, ig_username, video_url, caption, scheduled_time_iso, storage_path=None):
+def save_ig_account(supabase_client, user_id, account_info, access_token):
+    """
+    Salva (ou atualiza, se já existir) uma conta do Instagram vinculada ao
+    usuário logado no app -- é isso que garante que cada login só vê as
+    próprias contas conectadas.
+    """
+    return supabase_client.table("ig_accounts").upsert({
+        "user_id": user_id,
+        "ig_user_id": account_info["user_id"],
+        "username": account_info.get("username"),
+        "account_type": account_info.get("account_type"),
+        "access_token": access_token,
+    }, on_conflict="user_id,ig_user_id").execute()
+
+
+def list_ig_accounts(supabase_client, user_id):
+    return (
+        supabase_client.table("ig_accounts")
+        .select("*")
+        .eq("user_id", user_id)
+        .order("username")
+        .execute()
+        .data
+    )
+
+
+def create_scheduled_post(supabase_client, user_id, ig_id, access_token, video_url, caption, scheduled_time_iso, storage_path=None):
     return supabase_client.table("scheduled_posts").insert({
+        "user_id": user_id,
         "ig_id": ig_id,
-        "ig_username": ig_username,
+        "access_token": access_token,
         "video_url": video_url,
         "storage_path": storage_path,
         "caption": caption,
@@ -287,8 +314,8 @@ def create_scheduled_post(supabase_client, ig_id, ig_username, video_url, captio
     }).execute()
 
 
-def list_scheduled_posts(supabase_client, status=None):
-    query = supabase_client.table("scheduled_posts").select("*").order("scheduled_time")
+def list_scheduled_posts(supabase_client, user_id, status=None):
+    query = supabase_client.table("scheduled_posts").select("*").eq("user_id", user_id).order("scheduled_time")
     if status:
         query = query.eq("status", status)
     return query.execute().data
@@ -649,212 +676,219 @@ if not IG_SCHEDULING_ENABLED:
     )
     st.stop()
 
-if "IG_ACCESS_TOKEN" not in st.secrets:
-    st.info(
-        "Para usar essa etapa, adicione `IG_ACCESS_TOKEN` nos Secrets do Streamlit "
-        "(gerado no Graph API Explorer do Meta for Developers)."
+current_user_id = st.session_state["user"].id
+
+# --- Conectar uma conta do Instagram a ESTE login ---
+with st.expander("➕ Conectar uma conta do Instagram"):
+    st.caption(
+        "Cole um token gerado no Graph API Explorer (Meta for Developers) pra essa conta. "
+        "Ele fica salvo só pro seu login -- outros usuários do app não veem nem usam essa conta."
+    )
+    novo_token = st.text_input("Token de acesso (IGAA...):", type="password", key="novo_ig_token")
+    if st.button("Conectar conta", key="conectar_ig_button"):
+        if not novo_token.strip():
+            st.warning("Cole o token antes de conectar.")
+        else:
+            try:
+                account_info = get_ig_login_account(novo_token.strip())
+                save_ig_account(supabase, current_user_id, account_info, novo_token.strip())
+                st.success(f"Conta @{account_info['username']} conectada!")
+                st.rerun()
+            except Exception as connect_err:
+                st.error(f"Erro ao conectar: {connect_err}")
+
+# --- Dropdown com as contas JÁ conectadas por esse usuário ---
+minhas_contas = list_ig_accounts(supabase, current_user_id) if supabase else []
+
+if not minhas_contas:
+    st.info("Nenhuma conta conectada ainda. Use o \"➕ Conectar uma conta do Instagram\" acima pra começar.")
+    st.stop()
+
+opcoes_contas = {f"@{acc['username']}": acc for acc in minhas_contas}
+conta_selecionada_label = st.selectbox("Conta do Instagram para postar:", options=list(opcoes_contas.keys()), key="conta_ig_selecionada")
+conta_selecionada = opcoes_contas[conta_selecionada_label]
+ig_user_id = conta_selecionada["ig_user_id"]
+IG_ACCESS_TOKEN = conta_selecionada["access_token"]
+
+st.subheader("Publicar um vídeo")
+schedule_video_file = st.file_uploader("Vídeo (.mp4) já com o template aplicado:", type=["mp4"], key="ig_video_uploader")
+ig_caption = st.text_area("Legenda do Reels:", key="ig_caption_input")
+schedule_mode = st.radio("Quando publicar?", ["Agora", "Agendar para depois"], key="ig_schedule_mode")
+
+scheduled_datetime_iso = None
+if schedule_mode == "Agendar para depois":
+    col_a, col_b = st.columns(2)
+    with col_a:
+        schedule_date = st.date_input("Data:", key="ig_schedule_date")
+    with col_b:
+        schedule_time_input = st.time_input("Hora:", key="ig_schedule_time")
+    scheduled_dt = aplicar_jitter(datetime.combine(schedule_date, schedule_time_input))
+    scheduled_datetime_iso = scheduled_dt.isoformat()
+    st.caption("O horário real de publicação varia até 10 minutos pra mais ou pra menos (evita parecer bot).")
+
+if st.button("Confirmar", key="ig_confirm_button"):
+    if schedule_video_file is None:
+        st.warning("Envie o vídeo que deseja publicar.")
+    elif not supabase:
+        st.error("Conexão com o Supabase não disponível — não dá pra guardar o vídeo.")
+    else:
+        try:
+            with st.spinner("Enviando vídeo para o Storage..."):
+                dest_filename = f"reel_{int(time.time())}.mp4"
+                public_video_url = upload_video_bytes_to_storage(
+                    supabase, schedule_video_file.getvalue(), dest_filename
+                )
+
+            if schedule_mode == "Agora":
+                with st.spinner("Publicando no Instagram (isso pode levar até 1-2 minutos)..."):
+                    media_id = publish_reel_now(ig_user_id, public_video_url, ig_caption, IG_ACCESS_TOKEN)
+                try:
+                    supabase.storage.from_(IG_STORAGE_BUCKET).remove([dest_filename])
+                except Exception:
+                    pass  # publicação já deu certo, falha ao limpar não é crítica
+                st.success(f"Publicado com sucesso! ID da publicação: `{media_id}`")
+            else:
+                create_scheduled_post(
+                    supabase, current_user_id, ig_user_id, IG_ACCESS_TOKEN, public_video_url, ig_caption,
+                    scheduled_datetime_iso, storage_path=dest_filename,
+                )
+                st.success(f"Agendado para perto de {scheduled_dt.strftime('%d/%m/%Y às %H:%M')}!")
+
+        except Exception as publish_err:
+            st.error(f"Erro ao publicar/agendar: {publish_err}")
+
+st.markdown("---")
+st.subheader("📦 Agendamento em massa")
+st.caption(
+    "Define quantos vídeos por dia, em quais horários e dias da semana, "
+    "e a partir de quando — o app distribui os vídeos automaticamente nesses slots."
+)
+
+# --- Fonte dos vídeos ---
+videos_gerados_sessao = st.session_state.get("generated_videos", [])
+usar_gerados = False
+if videos_gerados_sessao:
+    usar_gerados = st.checkbox(
+        f"Usar os {len(videos_gerados_sessao)} vídeos gerados na Etapa 2 (nesta sessão)",
+        value=True,
+        key="bulk_usar_gerados",
     )
 else:
-    IG_ACCESS_TOKEN = st.secrets["IG_ACCESS_TOKEN"]
+    st.caption("Nenhum vídeo gerado nesta sessão ainda (gere na Etapa 2 pra aparecer aqui).")
 
-    # --- Descobrir a conta via Instagram Login ---
-    with st.expander("🔍 Descobrir minha Instagram Account ID"):
-        if st.button("Buscar minha conta"):
-            try:
-                account = get_ig_login_account(IG_ACCESS_TOKEN)
-                st.success(
-                    f"Conta **@{account['username']}** ({account.get('account_type', '')}) "
-                    f"→ ID: `{account['user_id']}`"
-                )
-            except Exception as lookup_err:
-                st.error(f"Erro ao buscar a conta: {lookup_err}")
+bulk_uploaded_files = st.file_uploader(
+    "Enviar vídeos manualmente (opcional, pode selecionar vários):",
+    type=["mp4"],
+    accept_multiple_files=True,
+    key="bulk_video_uploader",
+)
 
-    st.markdown("Cole aqui o ID que você encontrou acima:")
-    ig_user_id = st.text_input("Instagram Business Account ID:", key="ig_user_id_input")
+videos_para_agendar = []
+if usar_gerados:
+    videos_para_agendar.extend(videos_gerados_sessao)
+if bulk_uploaded_files:
+    for f in bulk_uploaded_files:
+        videos_para_agendar.append({"filename": f.name, "bytes": f.getvalue()})
 
-    st.subheader("Publicar um vídeo")
-    schedule_video_file = st.file_uploader("Vídeo (.mp4) já com o template aplicado:", type=["mp4"], key="ig_video_uploader")
-    ig_caption = st.text_area("Legenda do Reels:", key="ig_caption_input")
-    schedule_mode = st.radio("Quando publicar?", ["Agora", "Agendar para depois"], key="ig_schedule_mode")
+st.info(f"Total de vídeos prontos para agendar: **{len(videos_para_agendar)}**")
 
-    scheduled_datetime_iso = None
-    if schedule_mode == "Agendar para depois":
-        col_a, col_b = st.columns(2)
-        with col_a:
-            schedule_date = st.date_input("Data:", key="ig_schedule_date")
-        with col_b:
-            schedule_time_input = st.time_input("Hora:", key="ig_schedule_time")
-        scheduled_dt = aplicar_jitter(datetime.combine(schedule_date, schedule_time_input))
-        scheduled_datetime_iso = scheduled_dt.isoformat()
-        st.caption("O horário real de publicação varia até 10 minutos pra mais ou pra menos (evita parecer bot).")
+bulk_caption = st.text_area("Legenda (aplicada a todos os vídeos deste lote):", key="bulk_caption_input")
 
-    if st.button("Confirmar", key="ig_confirm_button"):
-        if not ig_user_id.strip():
-            st.warning("Preencha a Instagram Business Account ID acima.")
-        elif schedule_video_file is None:
-            st.warning("Envie o vídeo que deseja publicar.")
-        elif not supabase:
-            st.error("Conexão com o Supabase não disponível — não dá pra guardar o vídeo.")
-        else:
-            try:
-                with st.spinner("Enviando vídeo para o Storage..."):
-                    dest_filename = f"reel_{int(time.time())}.mp4"
-                    public_video_url = upload_video_bytes_to_storage(
-                        supabase, schedule_video_file.getvalue(), dest_filename
-                    )
+col1, col2 = st.columns(2)
+with col1:
+    videos_por_dia = st.number_input("Vídeos por dia:", min_value=1, max_value=10, value=1, key="bulk_videos_por_dia")
+with col2:
+    data_inicio = st.date_input("A partir de qual data:", key="bulk_data_inicio")
 
-                if schedule_mode == "Agora":
-                    with st.spinner("Publicando no Instagram (isso pode levar até 1-2 minutos)..."):
-                        media_id = publish_reel_now(ig_user_id.strip(), public_video_url, ig_caption, IG_ACCESS_TOKEN)
-                    try:
-                        supabase.storage.from_(IG_STORAGE_BUCKET).remove([dest_filename])
-                    except Exception:
-                        pass  # publicação já deu certo, falha ao limpar não é crítica
-                    st.success(f"Publicado com sucesso! ID da publicação: `{media_id}`")
-                else:
-                    create_scheduled_post(
-                        supabase, ig_user_id.strip(), None, public_video_url, ig_caption,
-                        scheduled_datetime_iso, storage_path=dest_filename,
-                    )
-                    st.success(f"Agendado para perto de {scheduled_dt.strftime('%d/%m/%Y às %H:%M')}!")
+st.markdown("**Horário de cada vídeo do dia:**")
+horarios_selecionados = []
+horario_cols = st.columns(min(int(videos_por_dia), 5) or 1)
+for i in range(int(videos_por_dia)):
+    with horario_cols[i % len(horario_cols)]:
+        horario = st.time_input(f"Vídeo {i + 1}", key=f"bulk_horario_{i}")
+        horarios_selecionados.append(horario)
 
-            except Exception as publish_err:
-                st.error(f"Erro ao publicar/agendar: {publish_err}")
+dias_semana_opcoes = {
+    "Segunda": 0, "Terça": 1, "Quarta": 2, "Quinta": 3,
+    "Sexta": 4, "Sábado": 5, "Domingo": 6,
+}
+dias_semana_labels = st.multiselect(
+    "Dias da semana em que deve publicar:",
+    options=list(dias_semana_opcoes.keys()),
+    default=["Segunda", "Terça", "Quarta", "Quinta", "Sexta"],
+    key="bulk_dias_semana",
+)
+dias_semana_numeros = {dias_semana_opcoes[d] for d in dias_semana_labels}
 
-    st.markdown("---")
-    st.subheader("📦 Agendamento em massa")
-    st.caption(
-        "Define quantos vídeos por dia, em quais horários e dias da semana, "
-        "e a partir de quando — o app distribui os vídeos automaticamente nesses slots."
-    )
-
-    # --- Fonte dos vídeos ---
-    videos_gerados_sessao = st.session_state.get("generated_videos", [])
-    usar_gerados = False
-    if videos_gerados_sessao:
-        usar_gerados = st.checkbox(
-            f"Usar os {len(videos_gerados_sessao)} vídeos gerados na Etapa 2 (nesta sessão)",
-            value=True,
-            key="bulk_usar_gerados",
-        )
+if st.button("📅 Gerar agendamento em massa", key="bulk_gerar_button"):
+    if not videos_para_agendar:
+        st.warning("Nenhum vídeo disponível — gere na Etapa 2 ou envie manualmente acima.")
+    elif not dias_semana_numeros:
+        st.warning("Selecione pelo menos um dia da semana.")
+    elif not supabase:
+        st.error("Conexão com o Supabase não disponível.")
     else:
-        st.caption("Nenhum vídeo gerado nesta sessão ainda (gere na Etapa 2 pra aparecer aqui).")
+        try:
+            horarios_datas = gerar_horarios_em_massa(
+                data_inicio, dias_semana_numeros, horarios_selecionados, len(videos_para_agendar)
+            )
 
-    bulk_uploaded_files = st.file_uploader(
-        "Enviar vídeos manualmente (opcional, pode selecionar vários):",
-        type=["mp4"],
-        accept_multiple_files=True,
-        key="bulk_video_uploader",
-    )
+            bulk_progress = st.progress(0)
+            criados = 0
+            for idx, (video, quando) in enumerate(zip(videos_para_agendar, horarios_datas), 1):
+                try:
+                    dest_filename = f"reel_bulk_{int(time.time())}_{idx}.mp4"
+                    public_url = upload_video_bytes_to_storage(supabase, video["bytes"], dest_filename)
+                    create_scheduled_post(
+                        supabase, current_user_id, ig_user_id, IG_ACCESS_TOKEN, public_url, bulk_caption,
+                        quando.isoformat(), storage_path=dest_filename,
+                    )
+                    criados += 1
+                except Exception as bulk_item_err:
+                    st.warning(f"Erro no vídeo {idx} ({video.get('filename', '')}): {bulk_item_err}")
+                bulk_progress.progress(idx / len(videos_para_agendar))
 
-    videos_para_agendar = []
-    if usar_gerados:
-        videos_para_agendar.extend(videos_gerados_sessao)
-    if bulk_uploaded_files:
-        for f in bulk_uploaded_files:
-            videos_para_agendar.append({"filename": f.name, "bytes": f.getvalue()})
+            st.success(
+                f"{criados} vídeo(s) agendado(s)! Do dia {horarios_datas[0].strftime('%d/%m/%Y às %H:%M')} "
+                f"até {horarios_datas[-1].strftime('%d/%m/%Y às %H:%M')}."
+            )
+            st.rerun()
+        except Exception as bulk_err:
+            st.error(f"Erro ao gerar agendamento em massa: {bulk_err}")
 
-    st.info(f"Total de vídeos prontos para agendar: **{len(videos_para_agendar)}**")
+st.subheader("📋 Agendamentos pendentes (dessa conta que você está logado)")
+try:
+    pending_posts = list_scheduled_posts(supabase, current_user_id, status="pending") if supabase else []
+    if not pending_posts:
+        st.caption("Nenhum agendamento pendente.")
+    else:
+        for post in pending_posts:
+            st.write(f"🕒 **{post['scheduled_time']}** — {post.get('caption', '')[:60] or '(sem legenda)'}")
 
-    bulk_caption = st.text_area("Legenda (aplicada a todos os vídeos deste lote):", key="bulk_caption_input")
-
-    col1, col2 = st.columns(2)
-    with col1:
-        videos_por_dia = st.number_input("Vídeos por dia:", min_value=1, max_value=10, value=1, key="bulk_videos_por_dia")
-    with col2:
-        data_inicio = st.date_input("A partir de qual data:", key="bulk_data_inicio")
-
-    st.markdown("**Horário de cada vídeo do dia:**")
-    horarios_selecionados = []
-    horario_cols = st.columns(min(int(videos_por_dia), 5) or 1)
-    for i in range(int(videos_por_dia)):
-        with horario_cols[i % len(horario_cols)]:
-            horario = st.time_input(f"Vídeo {i + 1}", key=f"bulk_horario_{i}")
-            horarios_selecionados.append(horario)
-
-    dias_semana_opcoes = {
-        "Segunda": 0, "Terça": 1, "Quarta": 2, "Quinta": 3,
-        "Sexta": 4, "Sábado": 5, "Domingo": 6,
-    }
-    dias_semana_labels = st.multiselect(
-        "Dias da semana em que deve publicar:",
-        options=list(dias_semana_opcoes.keys()),
-        default=["Segunda", "Terça", "Quarta", "Quinta", "Sexta"],
-        key="bulk_dias_semana",
-    )
-    dias_semana_numeros = {dias_semana_opcoes[d] for d in dias_semana_labels}
-
-    if st.button("📅 Gerar agendamento em massa", key="bulk_gerar_button"):
-        if not ig_user_id.strip():
-            st.warning("Preencha a Instagram Business Account ID acima.")
-        elif not videos_para_agendar:
-            st.warning("Nenhum vídeo disponível — gere na Etapa 2 ou envie manualmente acima.")
-        elif not dias_semana_numeros:
-            st.warning("Selecione pelo menos um dia da semana.")
-        elif not supabase:
-            st.error("Conexão com o Supabase não disponível.")
-        else:
-            try:
-                horarios_datas = gerar_horarios_em_massa(
-                    data_inicio, dias_semana_numeros, horarios_selecionados, len(videos_para_agendar)
-                )
-
-                bulk_progress = st.progress(0)
-                criados = 0
-                for idx, (video, quando) in enumerate(zip(videos_para_agendar, horarios_datas), 1):
-                    try:
-                        dest_filename = f"reel_bulk_{int(time.time())}_{idx}.mp4"
-                        public_url = upload_video_bytes_to_storage(supabase, video["bytes"], dest_filename)
-                        create_scheduled_post(
-                            supabase, ig_user_id.strip(), None, public_url, bulk_caption,
-                            quando.isoformat(), storage_path=dest_filename,
-                        )
-                        criados += 1
-                    except Exception as bulk_item_err:
-                        st.warning(f"Erro no vídeo {idx} ({video.get('filename', '')}): {bulk_item_err}")
-                    bulk_progress.progress(idx / len(videos_para_agendar))
-
-                st.success(
-                    f"{criados} vídeo(s) agendado(s)! Do dia {horarios_datas[0].strftime('%d/%m/%Y às %H:%M')} "
-                    f"até {horarios_datas[-1].strftime('%d/%m/%Y às %H:%M')}."
-                )
-                st.rerun()
-            except Exception as bulk_err:
-                st.error(f"Erro ao gerar agendamento em massa: {bulk_err}")
-
-    st.subheader("📋 Agendamentos pendentes")
-    try:
-        pending_posts = list_scheduled_posts(supabase, status="pending") if supabase else []
-        if not pending_posts:
-            st.caption("Nenhum agendamento pendente.")
-        else:
+        if st.button("🔄 Verificar e publicar agendados que já venceram (backup manual, o cron faz isso sozinho)"):
+            now_iso = datetime.now().isoformat()
+            published_count = 0
             for post in pending_posts:
-                st.write(f"🕒 **{post['scheduled_time']}** — {post.get('caption', '')[:60] or '(sem legenda)'}")
+                if post["scheduled_time"] <= now_iso:
+                    try:
+                        media_id = publish_reel_now(
+                            post["ig_id"], post["video_url"], post.get("caption", ""), post["access_token"]
+                        )
+                        update_scheduled_post_status(supabase, post["id"], "published", media_id=media_id)
+                        if post.get("storage_path"):
+                            try:
+                                supabase.storage.from_(IG_STORAGE_BUCKET).remove([post["storage_path"]])
+                            except Exception:
+                                pass  # publicação já deu certo, falha ao limpar não é crítica
+                        published_count += 1
+                    except Exception as auto_publish_err:
+                        update_scheduled_post_status(supabase, post["id"], "error", error_message=str(auto_publish_err))
+                        st.error(f"Erro ao publicar agendamento {post['id']}: {auto_publish_err}")
 
-            if st.button("🔄 Verificar e publicar agendados que já venceram (agora é só um backup, o cron faz isso sozinho)"):
-                now_iso = datetime.now().isoformat()
-                published_count = 0
-                for post in pending_posts:
-                    if post["scheduled_time"] <= now_iso:
-                        try:
-                            media_id = publish_reel_now(
-                                post["ig_id"], post["video_url"], post.get("caption", ""), IG_ACCESS_TOKEN
-                            )
-                            update_scheduled_post_status(supabase, post["id"], "published", media_id=media_id)
-                            if post.get("storage_path"):
-                                try:
-                                    supabase.storage.from_(IG_STORAGE_BUCKET).remove([post["storage_path"]])
-                                except Exception:
-                                    pass  # publicação já deu certo, falha ao limpar não é crítica
-                            published_count += 1
-                        except Exception as auto_publish_err:
-                            update_scheduled_post_status(supabase, post["id"], "error", error_message=str(auto_publish_err))
-                            st.error(f"Erro ao publicar agendamento {post['id']}: {auto_publish_err}")
-
-                if published_count:
-                    st.success(f"{published_count} vídeo(s) publicado(s)!")
-                    st.rerun()
-                else:
-                    st.info("Nenhum agendamento estava vencido ainda.")
-    except Exception as list_err:
-        st.error(f"Erro ao listar agendamentos: {list_err}")
+            if published_count:
+                st.success(f"{published_count} vídeo(s) publicado(s)!")
+                st.rerun()
+            else:
+                st.info("Nenhum agendamento estava vencido ainda.")
+except Exception as list_err:
+    st.error(f"Erro ao listar agendamentos: {list_err}")
