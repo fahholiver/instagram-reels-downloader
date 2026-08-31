@@ -26,6 +26,30 @@ def get_ig_login_account(access_token):
     return data
 
 
+def get_ig_account_stats(access_token):
+    """
+    Busca dados mais completos da conta para exibir num dashboard:
+    seguidores, quantidade de posts, foto de perfil, nome, biografia.
+    Se algum campo não estiver disponível pra esse token (permissões variam),
+    cai de volta pros campos básicos em vez de quebrar.
+    """
+    full_fields = "user_id,username,account_type,name,media_count,followers_count,follows_count,profile_picture_url,biography"
+    resp = requests.get(
+        f"{IG_GRAPH_BASE}/me",
+        params={"fields": full_fields, "access_token": access_token},
+        timeout=30,
+    )
+    data = resp.json()
+
+    if resp.status_code == 200 and "user_id" in data:
+        return data
+
+    # Fallback: alguns tokens/escopos não liberam todos os campos extras
+    basic = get_ig_login_account(access_token)
+    basic["_stats_limited"] = True
+    return basic
+
+
 def create_media_container(ig_user_id, video_url, caption, access_token):
     """Cria o container do Reels (etapa 1 de 2 da publicação)."""
     resp = requests.post(
