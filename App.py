@@ -16,6 +16,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 from ig_publisher import (
     IG_GRAPH_BASE,
     get_ig_login_account,
+    get_ig_account_stats,
     create_media_container,
     wait_for_container_ready,
     publish_container,
@@ -315,6 +316,27 @@ def list_ig_accounts(supabase_client, user_id):
         .execute()
         .data
     )
+
+
+def format_compact_number(n):
+    """1234 -> '1.2K', 1500000 -> '1.5M'. Deixa números grandes legíveis no card."""
+    if n is None:
+        return "—"
+    n = int(n)
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}K"
+    return str(n)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_cached_account_stats(access_token):
+    """
+    Cacheia por 5 minutos -- evita bater na API do Instagram toda vez que a
+    página recarrega (o que ela faz a cada clique em qualquer botão do app).
+    """
+    return get_ig_account_stats(access_token)
 
 
 def create_scheduled_post(supabase_client, user_id, ig_id, access_token, video_url, caption, scheduled_time_iso, storage_path=None):
@@ -703,6 +725,42 @@ minhas_contas = list_ig_accounts(supabase, current_user_id) if supabase else []
 if not minhas_contas:
     st.info(t("no_accounts_info"))
     st.stop()
+
+# --- Dashboard: um card por conta conectada, com dados reais ---
+st.subheader(t("dashboard_subheader"))
+
+all_pending_posts = list_scheduled_posts(supabase, current_user_id, status="pending") if supabase else []
+
+dashboard_cols = st.columns(2)
+for idx, acc in enumerate(minhas_contas):
+    with dashboard_cols[idx % 2]:
+        with st.container(border=True):
+            try:
+                stats = get_cached_account_stats(acc["access_token"])
+            except Exception as stats_err:
+                stats = None
+                st.error(t("dashboard_stats_error", error=stats_err))
+
+            if stats:
+                pic_col, info_col = st.columns([1, 3])
+                with pic_col:
+                    if stats.get("profile_picture_url"):
+                        st.image(stats["profile_picture_url"], width=60)
+                with info_col:
+                    st.markdown(f"**@{stats.get('username', acc['username'])}**")
+                    st.caption(stats.get("account_type", ""))
+
+                metric_col1, metric_col2 = st.columns(2)
+                metric_col1.metric(t("dashboard_followers"), format_compact_number(stats.get("followers_count")))
+                metric_col2.metric(t("dashboard_posts"), format_compact_number(stats.get("media_count")))
+
+                if stats.get("_stats_limited"):
+                    st.caption(t("dashboard_limited_stats"))
+
+                pending_for_this_account = len([p for p in all_pending_posts if p.get("ig_id") == acc["ig_user_id"]])
+                st.caption(t("dashboard_pending_count", count=pending_for_this_account))
+
+st.markdown("---")
 
 opcoes_contas = {f"@{acc['username']}": acc for acc in minhas_contas}
 conta_selecionada_label = st.selectbox(t("select_account_label"), options=list(opcoes_contas.keys()), key="conta_ig_selecionada")
