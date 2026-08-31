@@ -742,23 +742,46 @@ for idx, acc in enumerate(minhas_contas):
                 st.error(t("dashboard_stats_error", error=stats_err))
 
             if stats:
-                pic_col, info_col = st.columns([1, 3])
-                with pic_col:
-                    if stats.get("profile_picture_url"):
-                        st.image(stats["profile_picture_url"], width=60)
-                with info_col:
-                    st.markdown(f"**@{stats.get('username', acc['username'])}**")
-                    st.caption(stats.get("account_type", ""))
+                username = stats.get('username', acc['username'])
+                account_type = stats.get("account_type", "")
+                followers = format_compact_number(stats.get("followers_count"))
+                posts = format_compact_number(stats.get("media_count"))
+                pic_url = stats.get("profile_picture_url", "")
+                pending_for_this_account = len([p for p in all_pending_posts if p.get("ig_id") == acc["ig_user_id"]])
 
-                metric_col1, metric_col2 = st.columns(2)
-                metric_col1.metric(t("dashboard_followers"), format_compact_number(stats.get("followers_count")))
-                metric_col2.metric(t("dashboard_posts"), format_compact_number(stats.get("media_count")))
+                avatar_html = (
+                    f'<img src="{pic_url}" style="width:44px;height:44px;border-radius:50%;'
+                    f'object-fit:cover;flex-shrink:0;">'
+                    if pic_url else
+                    '<div style="width:44px;height:44px;border-radius:50%;background:#e0e0e0;flex-shrink:0;"></div>'
+                )
+
+                card_html = f"""
+                <div style="display:flex;align-items:center;gap:10px;">
+                    {avatar_html}
+                    <div style="line-height:1.2;min-width:0;">
+                        <div style="font-weight:700;font-size:1rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">@{username}</div>
+                        <div style="color:#888;font-size:0.75rem;">{account_type}</div>
+                    </div>
+                </div>
+                <div style="display:flex;gap:24px;margin-top:12px;">
+                    <div>
+                        <div style="color:#888;font-size:0.72rem;">{t("dashboard_followers")}</div>
+                        <div style="font-size:1.3rem;font-weight:700;">{followers}</div>
+                    </div>
+                    <div>
+                        <div style="color:#888;font-size:0.72rem;">{t("dashboard_posts")}</div>
+                        <div style="font-size:1.3rem;font-weight:700;">{posts}</div>
+                    </div>
+                </div>
+                <div style="margin-top:10px;color:#888;font-size:0.78rem;">
+                    🕒 {t("dashboard_pending_count", count=pending_for_this_account)}
+                </div>
+                """
+                st.markdown(card_html, unsafe_allow_html=True)
 
                 if stats.get("_stats_limited"):
                     st.caption(t("dashboard_limited_stats"))
-
-                pending_for_this_account = len([p for p in all_pending_posts if p.get("ig_id") == acc["ig_user_id"]])
-                st.caption(t("dashboard_pending_count", count=pending_for_this_account))
 
 st.markdown("---")
 
