@@ -50,6 +50,35 @@ def get_ig_account_stats(access_token):
     return basic
 
 
+def get_ig_recent_media(access_token, limit=6):
+    """
+    Busca os posts mais recentes da conta (feed), pra mostrar como miniaturas
+    no dashboard. Pra vídeos/Reels usa thumbnail_url; pra fotos usa media_url.
+    Retorna lista vazia (não quebra) se o token não tiver essa permissão.
+    """
+    fields = "id,caption,media_type,media_url,thumbnail_url,permalink,timestamp"
+    resp = requests.get(
+        f"{IG_GRAPH_BASE}/me/media",
+        params={"fields": fields, "limit": limit, "access_token": access_token},
+        timeout=30,
+    )
+    data = resp.json()
+
+    if resp.status_code != 200 or "data" not in data:
+        return []
+
+    media_list = []
+    for item in data["data"]:
+        thumb = item.get("thumbnail_url") or item.get("media_url")
+        if thumb:
+            media_list.append({
+                "thumbnail": thumb,
+                "permalink": item.get("permalink"),
+                "media_type": item.get("media_type"),
+            })
+    return media_list
+
+
 def create_media_container(ig_user_id, video_url, caption, access_token):
     """Cria o container do Reels (etapa 1 de 2 da publicação)."""
     resp = requests.post(
