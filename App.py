@@ -759,8 +759,7 @@ with tab_dashboard:
                 pending_for_this_account = len([p for p in all_pending_posts if p.get("ig_id") == acc["ig_user_id"]])
 
                 avatar_html = (
-                    f'<img src="{pic_url}" style="width:44px;height:44px;border-radius:50%;'
-                    f'object-fit:cover;flex-shrink:0;">'
+                    f'<img src="{pic_url}" style="width:44px;height:44px;border-radius:50%;object-fit:cover;flex-shrink:0;">'
                     if pic_url else
                     '<div style="width:44px;height:44px;border-radius:50%;background:#e0e0e0;flex-shrink:0;"></div>'
                 )
@@ -785,69 +784,48 @@ with tab_dashboard:
                 if recent_media:
                     thumbs_html = "".join(
                         f'<a href="{m["permalink"]}" target="_blank">'
-                        f'<img src="{m["thumbnail"]}" style="width:100%;aspect-ratio:1;object-fit:cover;'
-                        f'border-radius:6px;">'
-                        f'</a>'
+                        f'<img src="{m["thumbnail"]}" style="width:100%;aspect-ratio:1;object-fit:cover;border-radius:6px;"></a>'
                         for m in recent_media
                     )
-                    feed_html = f"""
-                    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:4px;margin-top:10px;">
-                        {thumbs_html}
-                    </div>
-                    """
+                    feed_html = (
+                        '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:4px;margin-top:10px;">'
+                        + thumbs_html + '</div>'
+                    )
 
                 # --- Moldura de iPhone (só visual, via CSS) envolvendo o card inteiro ---
-                phone_html = f"""
-                <div style="
-                    background:#000;
-                    border-radius:34px;
-                    padding:10px;
-                    box-shadow:0 6px 18px rgba(0,0,0,0.25);
-                    margin-bottom:16px;
-                    max-width:280px;
-                ">
-                    <div style="
-                        background:#fff;
-                        border-radius:24px;
-                        padding:22px 14px 16px 14px;
-                        position:relative;
-                        overflow:hidden;
-                    ">
-                        <div style="
-                            position:absolute; top:0; left:50%; transform:translateX(-50%);
-                            width:80px; height:16px; background:#000;
-                            border-bottom-left-radius:12px; border-bottom-right-radius:12px;
-                        "></div>
-                        <div style="display:flex;align-items:center;gap:10px;">
-                            {avatar_html}
-                            <div style="line-height:1.2;min-width:0;">
-                                <div style="font-weight:700;font-size:0.95rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">@{username}</div>
-                                <div style="color:#888;font-size:0.72rem;">{account_type}</div>
-                            </div>
-                        </div>
-                        {bio_html}
-                        <div style="display:flex;gap:20px;margin-top:12px;">
-                            <div>
-                                <div style="color:#888;font-size:0.68rem;">{t("dashboard_followers")}</div>
-                                <div style="font-size:1.2rem;font-weight:700;">{followers}</div>
-                            </div>
-                            <div>
-                                <div style="color:#888;font-size:0.68rem;">{t("dashboard_posts")}</div>
-                                <div style="font-size:1.2rem;font-weight:700;">{posts}</div>
-                            </div>
-                        </div>
-                        <div style="margin-top:8px;color:#888;font-size:0.72rem;">
-                            🕒 {t("dashboard_pending_count", count=pending_for_this_account)}
-                        </div>
-                        {limited_html}
-                        {feed_html}
-                        <div style="
-                            width:100px; height:4px; background:#000; opacity:0.25;
-                            border-radius:2px; margin:16px auto 0 auto;
-                        "></div>
-                    </div>
-                </div>
-                """
+                # IMPORTANTE: tudo numa string só, sem quebras de linha/indentação --
+                # o st.markdown trata linhas em branco/indentadas como bloco de código
+                # e quebra o HTML no meio (foi exatamente o bug do print anterior).
+                phone_html = (
+                    '<div style="background:#000;border-radius:34px;padding:10px;'
+                    'box-shadow:0 6px 18px rgba(0,0,0,0.25);margin-bottom:16px;max-width:280px;">'
+                    '<div style="background:#fff;border-radius:24px;padding:22px 14px 16px 14px;'
+                    'position:relative;overflow:hidden;">'
+                    '<div style="position:absolute;top:0;left:50%;transform:translateX(-50%);'
+                    'width:80px;height:16px;background:#000;border-bottom-left-radius:12px;'
+                    'border-bottom-right-radius:12px;"></div>'
+                    '<div style="display:flex;align-items:center;gap:10px;">'
+                    + avatar_html +
+                    '<div style="line-height:1.2;min-width:0;">'
+                    f'<div style="font-weight:700;font-size:0.95rem;white-space:nowrap;overflow:hidden;'
+                    f'text-overflow:ellipsis;">@{username}</div>'
+                    f'<div style="color:#888;font-size:0.72rem;">{account_type}</div>'
+                    '</div></div>'
+                    + bio_html +
+                    '<div style="display:flex;gap:20px;margin-top:12px;">'
+                    f'<div><div style="color:#888;font-size:0.68rem;">{t("dashboard_followers")}</div>'
+                    f'<div style="font-size:1.2rem;font-weight:700;">{followers}</div></div>'
+                    f'<div><div style="color:#888;font-size:0.68rem;">{t("dashboard_posts")}</div>'
+                    f'<div style="font-size:1.2rem;font-weight:700;">{posts}</div></div>'
+                    '</div>'
+                    f'<div style="margin-top:8px;color:#888;font-size:0.72rem;">🕒 '
+                    f'{t("dashboard_pending_count", count=pending_for_this_account)}</div>'
+                    + limited_html
+                    + feed_html +
+                    '<div style="width:100px;height:4px;background:#000;opacity:0.25;'
+                    'border-radius:2px;margin:16px auto 0 auto;"></div>'
+                    '</div></div>'
+                )
                 st.markdown(phone_html, unsafe_allow_html=True)
 
 
