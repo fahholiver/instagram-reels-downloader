@@ -17,6 +17,7 @@ from ig_publisher import (
     IG_GRAPH_BASE,
     get_ig_login_account,
     get_ig_account_stats,
+    get_ig_recent_media,
     create_media_container,
     wait_for_container_ready,
     publish_container,
@@ -339,6 +340,12 @@ def get_cached_account_stats(access_token):
     return get_ig_account_stats(access_token)
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def get_cached_recent_media(access_token, limit=6):
+    """Mesma lógica de cache, mas pro feed recente (miniaturas dos posts)."""
+    return get_ig_recent_media(access_token, limit=limit)
+
+
 def create_scheduled_post(supabase_client, user_id, ig_id, access_token, video_url, caption, scheduled_time_iso, storage_path=None):
     return supabase_client.table("scheduled_posts").insert({
         "user_id": user_id,
@@ -401,7 +408,6 @@ def gerar_horarios_em_massa(data_inicio, dias_semana_selecionados, horarios_por_
         dias_verificados += 1
 
     return resultado
-
 
 
 # -----------------------------------------------------------------------------
@@ -726,249 +732,280 @@ if not minhas_contas:
     st.info(t("no_accounts_info"))
     st.stop()
 
-# --- Dashboard: um card por conta conectada, com dados reais ---
-st.subheader(t("dashboard_subheader"))
+tab_dashboard, tab_manage = st.tabs([t("dashboard_tab_label"), t("manage_tab_label")])
 
-all_pending_posts = list_scheduled_posts(supabase, current_user_id, status="pending") if supabase else []
+with tab_dashboard:
+    # --- Dashboard: um card por conta conectada, com dados reais ---
+    st.subheader(t("dashboard_subheader"))
 
-dashboard_cols = st.columns(2)
-for idx, acc in enumerate(minhas_contas):
-    with dashboard_cols[idx % 2]:
-        with st.container(border=True):
-            try:
-                stats = get_cached_account_stats(acc["access_token"])
-            except Exception as stats_err:
-                stats = None
-                st.error(t("dashboard_stats_error", error=stats_err))
+    all_pending_posts = list_scheduled_posts(supabase, current_user_id, status="pending") if supabase else []
 
-            if stats:
-                username = stats.get('username', acc['username'])
-                account_type = stats.get("account_type", "")
-                followers = format_compact_number(stats.get("followers_count"))
-                posts = format_compact_number(stats.get("media_count"))
-                pic_url = stats.get("profile_picture_url", "")
-                pending_for_this_account = len([p for p in all_pending_posts if p.get("ig_id") == acc["ig_user_id"]])
-
-                avatar_html = (
-                    f'<img src="{pic_url}" style="width:44px;height:44px;border-radius:50%;'
-                    f'object-fit:cover;flex-shrink:0;">'
-                    if pic_url else
-                    '<div style="width:44px;height:44px;border-radius:50%;background:#e0e0e0;flex-shrink:0;"></div>'
-                )
-
-                card_html = f"""
-                <div style="display:flex;align-items:center;gap:10px;">
-                    {avatar_html}
-                    <div style="line-height:1.2;min-width:0;">
-                        <div style="font-weight:700;font-size:1rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">@{username}</div>
-                        <div style="color:#888;font-size:0.75rem;">{account_type}</div>
-                    </div>
-                </div>
-                <div style="display:flex;gap:24px;margin-top:12px;">
-                    <div>
-                        <div style="color:#888;font-size:0.72rem;">{t("dashboard_followers")}</div>
-                        <div style="font-size:1.3rem;font-weight:700;">{followers}</div>
-                    </div>
-                    <div>
-                        <div style="color:#888;font-size:0.72rem;">{t("dashboard_posts")}</div>
-                        <div style="font-size:1.3rem;font-weight:700;">{posts}</div>
-                    </div>
-                </div>
-                <div style="margin-top:10px;color:#888;font-size:0.78rem;">
-                    🕒 {t("dashboard_pending_count", count=pending_for_this_account)}
-                </div>
-                """
-                st.markdown(card_html, unsafe_allow_html=True)
-
-                if stats.get("_stats_limited"):
-                    st.caption(t("dashboard_limited_stats"))
-
-st.markdown("---")
-
-opcoes_contas = {f"@{acc['username']}": acc for acc in minhas_contas}
-conta_selecionada_label = st.selectbox(t("select_account_label"), options=list(opcoes_contas.keys()), key="conta_ig_selecionada")
-conta_selecionada = opcoes_contas[conta_selecionada_label]
-ig_user_id = conta_selecionada["ig_user_id"]
-IG_ACCESS_TOKEN = conta_selecionada["access_token"]
-
-st.subheader(t("publish_video_subheader"))
-schedule_video_file = st.file_uploader(t("video_uploader_label"), type=["mp4"], key="ig_video_uploader")
-ig_caption = st.text_area(t("reel_caption_label"), key="ig_caption_input")
-schedule_mode = st.radio(t("when_to_publish_label"), [t("publish_now_option"), t("schedule_later_option")], key="ig_schedule_mode")
-
-scheduled_datetime_iso = None
-if schedule_mode == t("schedule_later_option"):
-    col_a, col_b = st.columns(2)
-    with col_a:
-        schedule_date = st.date_input(t("date_label"), key="ig_schedule_date")
-    with col_b:
-        schedule_time_input = st.time_input(t("time_label"), key="ig_schedule_time")
-    scheduled_dt = aplicar_jitter(datetime.combine(schedule_date, schedule_time_input))
-    scheduled_datetime_iso = scheduled_dt.isoformat()
-    st.caption(t("jitter_caption"))
-
-if st.button(t("confirm_button"), key="ig_confirm_button"):
-    if schedule_video_file is None:
-        st.warning(t("upload_video_warning"))
-    elif not supabase:
-        st.error(t("supabase_unavailable_error"))
-    else:
-        try:
-            with st.spinner(t("uploading_spinner")):
-                dest_filename = f"reel_{int(time.time())}.mp4"
-                public_video_url = upload_video_bytes_to_storage(
-                    supabase, schedule_video_file.getvalue(), dest_filename
-                )
-
-            if schedule_mode == t("publish_now_option"):
-                with st.spinner(t("publishing_spinner")):
-                    media_id = publish_reel_now(ig_user_id, public_video_url, ig_caption, IG_ACCESS_TOKEN)
+    dashboard_cols = st.columns(2)
+    for idx, acc in enumerate(minhas_contas):
+        with dashboard_cols[idx % 2]:
+            with st.container(border=True):
                 try:
-                    supabase.storage.from_(IG_STORAGE_BUCKET).remove([dest_filename])
-                except Exception:
-                    pass  # publicação já deu certo, falha ao limpar não é crítica
-                st.success(t("published_success", media_id=media_id))
-            else:
-                create_scheduled_post(
-                    supabase, current_user_id, ig_user_id, IG_ACCESS_TOKEN, public_video_url, ig_caption,
-                    scheduled_datetime_iso, storage_path=dest_filename,
-                )
-                st.success(t("scheduled_success", datetime=scheduled_dt.strftime('%d/%m/%Y %H:%M')))
+                    stats = get_cached_account_stats(acc["access_token"])
+                except Exception as stats_err:
+                    stats = None
+                    st.error(t("dashboard_stats_error", error=stats_err))
 
-        except Exception as publish_err:
-            st.error(t("publish_schedule_error", error=publish_err))
+                if stats:
+                    username = stats.get('username', acc['username'])
+                    account_type = stats.get("account_type", "")
+                    biography = (stats.get("biography") or "").strip()
+                    followers = format_compact_number(stats.get("followers_count"))
+                    posts = format_compact_number(stats.get("media_count"))
+                    pic_url = stats.get("profile_picture_url", "")
+                    pending_for_this_account = len([p for p in all_pending_posts if p.get("ig_id") == acc["ig_user_id"]])
 
-st.markdown("---")
-st.subheader(t("bulk_subheader"))
-st.caption(t("bulk_caption_intro"))
-
-# --- Fonte dos vídeos ---
-videos_gerados_sessao = st.session_state.get("generated_videos", [])
-usar_gerados = False
-if videos_gerados_sessao:
-    usar_gerados = st.checkbox(
-        t("use_generated_checkbox", count=len(videos_gerados_sessao)),
-        value=True,
-        key="bulk_usar_gerados",
-    )
-else:
-    st.caption(t("no_generated_videos_caption"))
-
-bulk_uploaded_files = st.file_uploader(
-    t("bulk_uploader_label"),
-    type=["mp4"],
-    accept_multiple_files=True,
-    key="bulk_video_uploader",
-)
-
-videos_para_agendar = []
-if usar_gerados:
-    videos_para_agendar.extend(videos_gerados_sessao)
-if bulk_uploaded_files:
-    for f in bulk_uploaded_files:
-        videos_para_agendar.append({"filename": f.name, "bytes": f.getvalue()})
-
-st.info(t("total_videos_ready_info", count=len(videos_para_agendar)))
-
-bulk_caption = st.text_area(t("bulk_caption_label"), key="bulk_caption_input")
-
-col1, col2 = st.columns(2)
-with col1:
-    videos_por_dia = st.number_input(t("videos_per_day_label"), min_value=1, max_value=10, value=1, key="bulk_videos_por_dia")
-with col2:
-    data_inicio = st.date_input(t("start_date_label"), key="bulk_data_inicio")
-
-st.markdown(t("time_per_video_markdown"))
-horarios_selecionados = []
-horario_cols = st.columns(min(int(videos_por_dia), 5) or 1)
-for i in range(int(videos_por_dia)):
-    with horario_cols[i % len(horario_cols)]:
-        horario = st.time_input(t("video_slot_label", index=i + 1), key=f"bulk_horario_{i}")
-        horarios_selecionados.append(horario)
-
-dias_semana_opcoes = {
-    t("weekday_monday"): 0, t("weekday_tuesday"): 1, t("weekday_wednesday"): 2, t("weekday_thursday"): 3,
-    t("weekday_friday"): 4, t("weekday_saturday"): 5, t("weekday_sunday"): 6,
-}
-dias_semana_labels = st.multiselect(
-    t("weekdays_label"),
-    options=list(dias_semana_opcoes.keys()),
-    default=[t("weekday_monday"), t("weekday_tuesday"), t("weekday_wednesday"), t("weekday_thursday"), t("weekday_friday")],
-    key="bulk_dias_semana",
-)
-dias_semana_numeros = {dias_semana_opcoes[d] for d in dias_semana_labels}
-
-if st.button(t("generate_bulk_button"), key="bulk_gerar_button"):
-    if not videos_para_agendar:
-        st.warning(t("no_videos_available_warning"))
-    elif not dias_semana_numeros:
-        st.warning(t("select_weekday_warning"))
-    elif not supabase:
-        st.error(t("supabase_unavailable_error_plain"))
-    else:
-        try:
-            horarios_datas = gerar_horarios_em_massa(
-                data_inicio, dias_semana_numeros, horarios_selecionados, len(videos_para_agendar)
-            )
-
-            bulk_progress = st.progress(0)
-            criados = 0
-            for idx, (video, quando) in enumerate(zip(videos_para_agendar, horarios_datas), 1):
-                try:
-                    dest_filename = f"reel_bulk_{int(time.time())}_{idx}.mp4"
-                    public_url = upload_video_bytes_to_storage(supabase, video["bytes"], dest_filename)
-                    create_scheduled_post(
-                        supabase, current_user_id, ig_user_id, IG_ACCESS_TOKEN, public_url, bulk_caption,
-                        quando.isoformat(), storage_path=dest_filename,
+                    avatar_html = (
+                        f'<img src="{pic_url}" style="width:44px;height:44px;border-radius:50%;'
+                        f'object-fit:cover;flex-shrink:0;">'
+                        if pic_url else
+                        '<div style="width:44px;height:44px;border-radius:50%;background:#e0e0e0;flex-shrink:0;"></div>'
                     )
-                    criados += 1
-                except Exception as bulk_item_err:
-                    st.warning(t("bulk_item_error", index=idx, filename=video.get('filename', ''), error=bulk_item_err))
-                bulk_progress.progress(idx / len(videos_para_agendar))
 
-            st.success(t(
-                "bulk_success",
-                count=criados,
-                first=horarios_datas[0].strftime('%d/%m/%Y %H:%M'),
-                last=horarios_datas[-1].strftime('%d/%m/%Y %H:%M'),
-            ))
-            st.rerun()
-        except Exception as bulk_err:
-            st.error(t("bulk_error", error=bulk_err))
+                    bio_html = (
+                        f'<div style="color:#555;font-size:0.78rem;margin-top:8px;line-height:1.3;">{biography[:90]}</div>'
+                        if biography else ""
+                    )
 
-st.subheader(t("pending_subheader"))
-try:
-    pending_posts = list_scheduled_posts(supabase, current_user_id, status="pending") if supabase else []
-    if not pending_posts:
-        st.caption(t("no_pending_caption"))
-    else:
-        for post in pending_posts:
-            st.write(t("pending_item_label", time=post['scheduled_time'], caption=post.get('caption', '')[:60] or t("no_caption_placeholder")))
+                    card_html = f"""
+                    <div style="display:flex;align-items:center;gap:10px;">
+                        {avatar_html}
+                        <div style="line-height:1.2;min-width:0;">
+                            <div style="font-weight:700;font-size:1rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">@{username}</div>
+                            <div style="color:#888;font-size:0.75rem;">{account_type}</div>
+                        </div>
+                    </div>
+                    {bio_html}
+                    <div style="display:flex;gap:24px;margin-top:12px;">
+                        <div>
+                            <div style="color:#888;font-size:0.72rem;">{t("dashboard_followers")}</div>
+                            <div style="font-size:1.3rem;font-weight:700;">{followers}</div>
+                        </div>
+                        <div>
+                            <div style="color:#888;font-size:0.72rem;">{t("dashboard_posts")}</div>
+                            <div style="font-size:1.3rem;font-weight:700;">{posts}</div>
+                        </div>
+                    </div>
+                    <div style="margin-top:10px;color:#888;font-size:0.78rem;">
+                        🕒 {t("dashboard_pending_count", count=pending_for_this_account)}
+                    </div>
+                    """
+                    st.markdown(card_html, unsafe_allow_html=True)
 
-        if st.button(t("check_pending_button")):
-            now_iso = datetime.now().isoformat()
-            published_count = 0
-            for post in pending_posts:
-                if post["scheduled_time"] <= now_iso:
+                    if stats.get("_stats_limited"):
+                        st.caption(t("dashboard_limited_stats"))
+
+                    # --- Miniaturas do feed recente ---
                     try:
-                        media_id = publish_reel_now(
-                            post["ig_id"], post["video_url"], post.get("caption", ""), post["access_token"]
-                        )
-                        update_scheduled_post_status(supabase, post["id"], "published", media_id=media_id)
-                        if post.get("storage_path"):
-                            try:
-                                supabase.storage.from_(IG_STORAGE_BUCKET).remove([post["storage_path"]])
-                            except Exception:
-                                pass  # publicação já deu certo, falha ao limpar não é crítica
-                        published_count += 1
-                    except Exception as auto_publish_err:
-                        update_scheduled_post_status(supabase, post["id"], "error", error_message=str(auto_publish_err))
-                        st.error(t("auto_publish_error", id=post['id'], error=auto_publish_err))
+                        recent_media = get_cached_recent_media(acc["access_token"], limit=6)
+                    except Exception:
+                        recent_media = []
 
-            if published_count:
-                st.success(t("published_count_success", count=published_count))
+                    if recent_media:
+                        thumbs_html = "".join(
+                            f'<a href="{m["permalink"]}" target="_blank">'
+                            f'<img src="{m["thumbnail"]}" style="width:100%;aspect-ratio:1;object-fit:cover;'
+                            f'border-radius:6px;">'
+                            f'</a>'
+                            for m in recent_media
+                        )
+                        grid_html = f"""
+                        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:4px;margin-top:10px;">
+                            {thumbs_html}
+                        </div>
+                        """
+                        st.markdown(grid_html, unsafe_allow_html=True)
+
+
+with tab_manage:
+    opcoes_contas = {f"@{acc['username']}": acc for acc in minhas_contas}
+    conta_selecionada_label = st.selectbox(t("select_account_label"), options=list(opcoes_contas.keys()), key="conta_ig_selecionada")
+    conta_selecionada = opcoes_contas[conta_selecionada_label]
+    ig_user_id = conta_selecionada["ig_user_id"]
+    IG_ACCESS_TOKEN = conta_selecionada["access_token"]
+
+    st.subheader(t("publish_video_subheader"))
+    schedule_video_file = st.file_uploader(t("video_uploader_label"), type=["mp4"], key="ig_video_uploader")
+    ig_caption = st.text_area(t("reel_caption_label"), key="ig_caption_input")
+    schedule_mode = st.radio(t("when_to_publish_label"), [t("publish_now_option"), t("schedule_later_option")], key="ig_schedule_mode")
+
+    scheduled_datetime_iso = None
+    if schedule_mode == t("schedule_later_option"):
+        col_a, col_b = st.columns(2)
+        with col_a:
+            schedule_date = st.date_input(t("date_label"), key="ig_schedule_date")
+        with col_b:
+            schedule_time_input = st.time_input(t("time_label"), key="ig_schedule_time")
+        scheduled_dt = aplicar_jitter(datetime.combine(schedule_date, schedule_time_input))
+        scheduled_datetime_iso = scheduled_dt.isoformat()
+        st.caption(t("jitter_caption"))
+
+    if st.button(t("confirm_button"), key="ig_confirm_button"):
+        if schedule_video_file is None:
+            st.warning(t("upload_video_warning"))
+        elif not supabase:
+            st.error(t("supabase_unavailable_error"))
+        else:
+            try:
+                with st.spinner(t("uploading_spinner")):
+                    dest_filename = f"reel_{int(time.time())}.mp4"
+                    public_video_url = upload_video_bytes_to_storage(
+                        supabase, schedule_video_file.getvalue(), dest_filename
+                    )
+
+                if schedule_mode == t("publish_now_option"):
+                    with st.spinner(t("publishing_spinner")):
+                        media_id = publish_reel_now(ig_user_id, public_video_url, ig_caption, IG_ACCESS_TOKEN)
+                    try:
+                        supabase.storage.from_(IG_STORAGE_BUCKET).remove([dest_filename])
+                    except Exception:
+                        pass  # publicação já deu certo, falha ao limpar não é crítica
+                    st.success(t("published_success", media_id=media_id))
+                else:
+                    create_scheduled_post(
+                        supabase, current_user_id, ig_user_id, IG_ACCESS_TOKEN, public_video_url, ig_caption,
+                        scheduled_datetime_iso, storage_path=dest_filename,
+                    )
+                    st.success(t("scheduled_success", datetime=scheduled_dt.strftime('%d/%m/%Y %H:%M')))
+
+            except Exception as publish_err:
+                st.error(t("publish_schedule_error", error=publish_err))
+
+    st.markdown("---")
+    st.subheader(t("bulk_subheader"))
+    st.caption(t("bulk_caption_intro"))
+
+    # --- Fonte dos vídeos ---
+    videos_gerados_sessao = st.session_state.get("generated_videos", [])
+    usar_gerados = False
+    if videos_gerados_sessao:
+        usar_gerados = st.checkbox(
+            t("use_generated_checkbox", count=len(videos_gerados_sessao)),
+            value=True,
+            key="bulk_usar_gerados",
+        )
+    else:
+        st.caption(t("no_generated_videos_caption"))
+
+    bulk_uploaded_files = st.file_uploader(
+        t("bulk_uploader_label"),
+        type=["mp4"],
+        accept_multiple_files=True,
+        key="bulk_video_uploader",
+    )
+
+    videos_para_agendar = []
+    if usar_gerados:
+        videos_para_agendar.extend(videos_gerados_sessao)
+    if bulk_uploaded_files:
+        for f in bulk_uploaded_files:
+            videos_para_agendar.append({"filename": f.name, "bytes": f.getvalue()})
+
+    st.info(t("total_videos_ready_info", count=len(videos_para_agendar)))
+
+    bulk_caption = st.text_area(t("bulk_caption_label"), key="bulk_caption_input")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        videos_por_dia = st.number_input(t("videos_per_day_label"), min_value=1, max_value=10, value=1, key="bulk_videos_por_dia")
+    with col2:
+        data_inicio = st.date_input(t("start_date_label"), key="bulk_data_inicio")
+
+    st.markdown(t("time_per_video_markdown"))
+    horarios_selecionados = []
+    horario_cols = st.columns(min(int(videos_por_dia), 5) or 1)
+    for i in range(int(videos_por_dia)):
+        with horario_cols[i % len(horario_cols)]:
+            horario = st.time_input(t("video_slot_label", index=i + 1), key=f"bulk_horario_{i}")
+            horarios_selecionados.append(horario)
+
+    dias_semana_opcoes = {
+        t("weekday_monday"): 0, t("weekday_tuesday"): 1, t("weekday_wednesday"): 2, t("weekday_thursday"): 3,
+        t("weekday_friday"): 4, t("weekday_saturday"): 5, t("weekday_sunday"): 6,
+    }
+    dias_semana_labels = st.multiselect(
+        t("weekdays_label"),
+        options=list(dias_semana_opcoes.keys()),
+        default=[t("weekday_monday"), t("weekday_tuesday"), t("weekday_wednesday"), t("weekday_thursday"), t("weekday_friday")],
+        key="bulk_dias_semana",
+    )
+    dias_semana_numeros = {dias_semana_opcoes[d] for d in dias_semana_labels}
+
+    if st.button(t("generate_bulk_button"), key="bulk_gerar_button"):
+        if not videos_para_agendar:
+            st.warning(t("no_videos_available_warning"))
+        elif not dias_semana_numeros:
+            st.warning(t("select_weekday_warning"))
+        elif not supabase:
+            st.error(t("supabase_unavailable_error_plain"))
+        else:
+            try:
+                horarios_datas = gerar_horarios_em_massa(
+                    data_inicio, dias_semana_numeros, horarios_selecionados, len(videos_para_agendar)
+                )
+
+                bulk_progress = st.progress(0)
+                criados = 0
+                for idx, (video, quando) in enumerate(zip(videos_para_agendar, horarios_datas), 1):
+                    try:
+                        dest_filename = f"reel_bulk_{int(time.time())}_{idx}.mp4"
+                        public_url = upload_video_bytes_to_storage(supabase, video["bytes"], dest_filename)
+                        create_scheduled_post(
+                            supabase, current_user_id, ig_user_id, IG_ACCESS_TOKEN, public_url, bulk_caption,
+                            quando.isoformat(), storage_path=dest_filename,
+                        )
+                        criados += 1
+                    except Exception as bulk_item_err:
+                        st.warning(t("bulk_item_error", index=idx, filename=video.get('filename', ''), error=bulk_item_err))
+                    bulk_progress.progress(idx / len(videos_para_agendar))
+
+                st.success(t(
+                    "bulk_success",
+                    count=criados,
+                    first=horarios_datas[0].strftime('%d/%m/%Y %H:%M'),
+                    last=horarios_datas[-1].strftime('%d/%m/%Y %H:%M'),
+                ))
                 st.rerun()
-            else:
-                st.info(t("no_due_schedules_info"))
-except Exception as list_err:
-    st.error(t("list_schedules_error", error=list_err))
+            except Exception as bulk_err:
+                st.error(t("bulk_error", error=bulk_err))
+
+    st.subheader(t("pending_subheader"))
+    try:
+        pending_posts = list_scheduled_posts(supabase, current_user_id, status="pending") if supabase else []
+        if not pending_posts:
+            st.caption(t("no_pending_caption"))
+        else:
+            for post in pending_posts:
+                st.write(t("pending_item_label", time=post['scheduled_time'], caption=post.get('caption', '')[:60] or t("no_caption_placeholder")))
+
+            if st.button(t("check_pending_button")):
+                now_iso = datetime.now().isoformat()
+                published_count = 0
+                for post in pending_posts:
+                    if post["scheduled_time"] <= now_iso:
+                        try:
+                            media_id = publish_reel_now(
+                                post["ig_id"], post["video_url"], post.get("caption", ""), post["access_token"]
+                            )
+                            update_scheduled_post_status(supabase, post["id"], "published", media_id=media_id)
+                            if post.get("storage_path"):
+                                try:
+                                    supabase.storage.from_(IG_STORAGE_BUCKET).remove([post["storage_path"]])
+                                except Exception:
+                                    pass  # publicação já deu certo, falha ao limpar não é crítica
+                            published_count += 1
+                        except Exception as auto_publish_err:
+                            update_scheduled_post_status(supabase, post["id"], "error", error_message=str(auto_publish_err))
+                            st.error(t("auto_publish_error", id=post['id'], error=auto_publish_err))
+
+                if published_count:
+                    st.success(t("published_count_success", count=published_count))
+                    st.rerun()
+                else:
+                    st.info(t("no_due_schedules_info"))
+    except Exception as list_err:
+        st.error(t("list_schedules_error", error=list_err))
