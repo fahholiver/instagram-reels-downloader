@@ -743,82 +743,112 @@ with tab_dashboard:
     dashboard_cols = st.columns(2)
     for idx, acc in enumerate(minhas_contas):
         with dashboard_cols[idx % 2]:
-            with st.container(border=True):
+            try:
+                stats = get_cached_account_stats(acc["access_token"])
+            except Exception as stats_err:
+                stats = None
+                st.error(t("dashboard_stats_error", error=stats_err))
+
+            if stats:
+                username = stats.get('username', acc['username'])
+                account_type = stats.get("account_type", "")
+                biography = (stats.get("biography") or "").strip()
+                followers = format_compact_number(stats.get("followers_count"))
+                posts = format_compact_number(stats.get("media_count"))
+                pic_url = stats.get("profile_picture_url", "")
+                pending_for_this_account = len([p for p in all_pending_posts if p.get("ig_id") == acc["ig_user_id"]])
+
+                avatar_html = (
+                    f'<img src="{pic_url}" style="width:44px;height:44px;border-radius:50%;'
+                    f'object-fit:cover;flex-shrink:0;">'
+                    if pic_url else
+                    '<div style="width:44px;height:44px;border-radius:50%;background:#e0e0e0;flex-shrink:0;"></div>'
+                )
+
+                bio_html = (
+                    f'<div style="color:#555;font-size:0.78rem;margin-top:8px;line-height:1.3;">{biography[:90]}</div>'
+                    if biography else ""
+                )
+
+                limited_html = (
+                    f'<div style="color:#aaa;font-size:0.68rem;margin-top:6px;">{t("dashboard_limited_stats")}</div>'
+                    if stats.get("_stats_limited") else ""
+                )
+
+                # --- Miniaturas do feed recente ---
                 try:
-                    stats = get_cached_account_stats(acc["access_token"])
-                except Exception as stats_err:
-                    stats = None
-                    st.error(t("dashboard_stats_error", error=stats_err))
+                    recent_media = get_cached_recent_media(acc["access_token"], limit=6)
+                except Exception:
+                    recent_media = []
 
-                if stats:
-                    username = stats.get('username', acc['username'])
-                    account_type = stats.get("account_type", "")
-                    biography = (stats.get("biography") or "").strip()
-                    followers = format_compact_number(stats.get("followers_count"))
-                    posts = format_compact_number(stats.get("media_count"))
-                    pic_url = stats.get("profile_picture_url", "")
-                    pending_for_this_account = len([p for p in all_pending_posts if p.get("ig_id") == acc["ig_user_id"]])
-
-                    avatar_html = (
-                        f'<img src="{pic_url}" style="width:44px;height:44px;border-radius:50%;'
-                        f'object-fit:cover;flex-shrink:0;">'
-                        if pic_url else
-                        '<div style="width:44px;height:44px;border-radius:50%;background:#e0e0e0;flex-shrink:0;"></div>'
+                feed_html = ""
+                if recent_media:
+                    thumbs_html = "".join(
+                        f'<a href="{m["permalink"]}" target="_blank">'
+                        f'<img src="{m["thumbnail"]}" style="width:100%;aspect-ratio:1;object-fit:cover;'
+                        f'border-radius:6px;">'
+                        f'</a>'
+                        for m in recent_media
                     )
-
-                    bio_html = (
-                        f'<div style="color:#555;font-size:0.78rem;margin-top:8px;line-height:1.3;">{biography[:90]}</div>'
-                        if biography else ""
-                    )
-
-                    card_html = f"""
-                    <div style="display:flex;align-items:center;gap:10px;">
-                        {avatar_html}
-                        <div style="line-height:1.2;min-width:0;">
-                            <div style="font-weight:700;font-size:1rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">@{username}</div>
-                            <div style="color:#888;font-size:0.75rem;">{account_type}</div>
-                        </div>
-                    </div>
-                    {bio_html}
-                    <div style="display:flex;gap:24px;margin-top:12px;">
-                        <div>
-                            <div style="color:#888;font-size:0.72rem;">{t("dashboard_followers")}</div>
-                            <div style="font-size:1.3rem;font-weight:700;">{followers}</div>
-                        </div>
-                        <div>
-                            <div style="color:#888;font-size:0.72rem;">{t("dashboard_posts")}</div>
-                            <div style="font-size:1.3rem;font-weight:700;">{posts}</div>
-                        </div>
-                    </div>
-                    <div style="margin-top:10px;color:#888;font-size:0.78rem;">
-                        🕒 {t("dashboard_pending_count", count=pending_for_this_account)}
+                    feed_html = f"""
+                    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:4px;margin-top:10px;">
+                        {thumbs_html}
                     </div>
                     """
-                    st.markdown(card_html, unsafe_allow_html=True)
 
-                    if stats.get("_stats_limited"):
-                        st.caption(t("dashboard_limited_stats"))
-
-                    # --- Miniaturas do feed recente ---
-                    try:
-                        recent_media = get_cached_recent_media(acc["access_token"], limit=6)
-                    except Exception:
-                        recent_media = []
-
-                    if recent_media:
-                        thumbs_html = "".join(
-                            f'<a href="{m["permalink"]}" target="_blank">'
-                            f'<img src="{m["thumbnail"]}" style="width:100%;aspect-ratio:1;object-fit:cover;'
-                            f'border-radius:6px;">'
-                            f'</a>'
-                            for m in recent_media
-                        )
-                        grid_html = f"""
-                        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:4px;margin-top:10px;">
-                            {thumbs_html}
+                # --- Moldura de iPhone (só visual, via CSS) envolvendo o card inteiro ---
+                phone_html = f"""
+                <div style="
+                    background:#000;
+                    border-radius:34px;
+                    padding:10px;
+                    box-shadow:0 6px 18px rgba(0,0,0,0.25);
+                    margin-bottom:16px;
+                    max-width:280px;
+                ">
+                    <div style="
+                        background:#fff;
+                        border-radius:24px;
+                        padding:22px 14px 16px 14px;
+                        position:relative;
+                        overflow:hidden;
+                    ">
+                        <div style="
+                            position:absolute; top:0; left:50%; transform:translateX(-50%);
+                            width:80px; height:16px; background:#000;
+                            border-bottom-left-radius:12px; border-bottom-right-radius:12px;
+                        "></div>
+                        <div style="display:flex;align-items:center;gap:10px;">
+                            {avatar_html}
+                            <div style="line-height:1.2;min-width:0;">
+                                <div style="font-weight:700;font-size:0.95rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">@{username}</div>
+                                <div style="color:#888;font-size:0.72rem;">{account_type}</div>
+                            </div>
                         </div>
-                        """
-                        st.markdown(grid_html, unsafe_allow_html=True)
+                        {bio_html}
+                        <div style="display:flex;gap:20px;margin-top:12px;">
+                            <div>
+                                <div style="color:#888;font-size:0.68rem;">{t("dashboard_followers")}</div>
+                                <div style="font-size:1.2rem;font-weight:700;">{followers}</div>
+                            </div>
+                            <div>
+                                <div style="color:#888;font-size:0.68rem;">{t("dashboard_posts")}</div>
+                                <div style="font-size:1.2rem;font-weight:700;">{posts}</div>
+                            </div>
+                        </div>
+                        <div style="margin-top:8px;color:#888;font-size:0.72rem;">
+                            🕒 {t("dashboard_pending_count", count=pending_for_this_account)}
+                        </div>
+                        {limited_html}
+                        {feed_html}
+                        <div style="
+                            width:100px; height:4px; background:#000; opacity:0.25;
+                            border-radius:2px; margin:16px auto 0 auto;
+                        "></div>
+                    </div>
+                </div>
+                """
+                st.markdown(phone_html, unsafe_allow_html=True)
 
 
 with tab_manage:
