@@ -69,10 +69,7 @@ BOX_SIDE_MARGIN = 40        # margem branca nas laterais da caixa do vídeo (mes
 FONT_BOLD_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 FONT_REGULAR_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 
-BG_COLOR = (255, 255, 255)
-TEXT_COLOR = (10, 10, 10)
-HANDLE_COLOR = (100, 100, 100)
-BOX_COLOR = (255, 255, 255)   # fundo/limite do vídeo agora é branco (era preto)
+DEFAULT_BG_HEX = "#FFFFFF"  # cor de fundo padrão do template (usuário pode trocar na Etapa 1)
 VERIFIED_BLUE = (59, 130, 246)
 
 # -----------------------------------------------------------------------------
@@ -148,13 +145,35 @@ def draw_verified_badge(draw_ctx, x, y, size=34):
     )
 
 
-def build_background_canvas(avatar_bytes, full_name, username, verified, caption=""):
+def get_template_colors(bg_hex):
+    """
+    Recebe a cor de fundo escolhida (hex, ex: '#000000') e devolve
+    (bg_rgb, text_color, handle_color) com contraste automático --
+    fundo escuro = texto branco, fundo claro = texto preto.
+    """
+    bg_hex = bg_hex.lstrip("#")
+    bg_rgb = tuple(int(bg_hex[i:i + 2], 16) for i in (0, 2, 4))
+    luminance = (0.299 * bg_rgb[0] + 0.587 * bg_rgb[1] + 0.114 * bg_rgb[2]) / 255
+
+    if luminance < 0.5:
+        text_color = (255, 255, 255)
+        handle_color = (190, 190, 190)
+    else:
+        text_color = (10, 10, 10)
+        handle_color = (100, 100, 100)
+
+    return bg_rgb, text_color, handle_color
+
+
+def build_background_canvas(avatar_bytes, full_name, username, verified, caption="", bg_hex="#FFFFFF"):
     """
     Monta o fundo estático: avatar + nome + selo + @usuario no topo, e a
     caixa preta (o LIMITE onde o vídeo será posicionado) logo abaixo.
     Retorna: (caminho_png, box_x, box_y, box_w, box_h)
     """
-    canvas = Image.new("RGB", (CANVAS_WIDTH, CANVAS_HEIGHT), BG_COLOR)
+    bg_rgb, text_color, handle_color = get_template_colors(bg_hex)
+
+    canvas = Image.new("RGB", (CANVAS_WIDTH, CANVAS_HEIGHT), bg_rgb)
     draw = ImageDraw.Draw(canvas)
 
     # --- Calcula a largura do bloco (avatar + espaço + texto) para centralizar ---
@@ -203,13 +222,13 @@ def build_background_canvas(avatar_bytes, full_name, username, verified, caption
 
     # --- Nome + selo verificado ---
     name_y = AVATAR_MARGIN_TOP + 2
-    draw.text((text_x, name_y), display_name, font=name_font, fill=TEXT_COLOR)
+    draw.text((text_x, name_y), display_name, font=name_font, fill=text_color)
 
     if verified:
         draw_verified_badge(draw, text_x + name_w + badge_gap, name_y + 6, size=badge_size)
 
     handle_y = name_y + 58
-    draw.text((text_x, handle_y), handle_text, font=handle_font, fill=HANDLE_COLOR)
+    draw.text((text_x, handle_y), handle_text, font=handle_font, fill=handle_color)
 
     # --- Legenda opcional (texto extra abaixo do @) ---
     if caption:
@@ -220,16 +239,17 @@ def build_background_canvas(avatar_bytes, full_name, username, verified, caption
             (CANVAS_WIDTH / 2, cap_y),
             wrapped,
             font=cap_font,
-            fill=TEXT_COLOR,
+            fill=text_color,
             anchor="ma",
             align="center",
             spacing=6,
         )
 
     # --- Caixa = o limite onde o vídeo pode ocupar (com margem nas laterais) ---
+    # A caixa usa a MESMA cor do fundo, pra o vídeo letterboxed combinar com o template
     box_x, box_y = BOX_SIDE_MARGIN, HEADER_HEIGHT + BOX_TOP_MARGIN
     box_w, box_h = CANVAS_WIDTH - (2 * BOX_SIDE_MARGIN), BOX_HEIGHT
-    draw.rectangle((box_x, box_y, box_x + box_w, box_y + box_h), fill=BOX_COLOR)
+    draw.rectangle((box_x, box_y, box_x + box_w, box_y + box_h), fill=bg_rgb)
 
     tmp_path = os.path.join(tempfile.gettempdir(), f"bg_{username}.png")
     canvas.save(tmp_path)
@@ -270,10 +290,23 @@ def compose_video_with_template(video_path, background_png, box_x, box_y, box_w,
         raise RuntimeError(f"Erro no FFmpeg: {result.stderr[-800:]}")
 
 
-def download_bytes(url, headers, timeout=30):
-    resp = requests.get(url, headers=headers, timeout=timeout)
-    resp.raise_for_status()
-    return resp.content
+def download_bytes(url, headers, timeout=60, max_retries=3):
+    """
+    Baixa o conteúdo de uma URL com novas tentativas em caso de timeout/erro de
+    rede -- os CDNs do Instagram às vezes demoram ou falham na primeira tentativa
+    quando acessados de servidores de nuvem (Streamlit Cloud, GitHub Actions etc.).
+    """
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            resp = requests.get(url, headers=headers, timeout=timeout)
+            resp.raise_for_status()
+            return resp.content
+        except Exception as e:
+            last_error = e
+            if attempt < max_retries:
+                time.sleep(2 * attempt)  # espera 2s, depois 4s, antes de tentar de novo
+    raise last_error
 
 
 # -----------------------------------------------------------------------------
@@ -284,11 +317,20 @@ def upload_video_bytes_to_storage(supabase_client, file_bytes, dest_filename, bu
     Sobe o vídeo (em bytes) para um bucket público do Supabase Storage e
     retorna a URL pública -- a Meta precisa conseguir baixar o vídeo por essa URL.
     """
-    supabase_client.storage.from_(bucket).upload(
-        dest_filename,
-        file_bytes,
-        {"content-type": "video/mp4", "upsert": "true"},
-    )
+    try:
+        supabase_client.storage.from_(bucket).upload(
+            dest_filename,
+            file_bytes,
+            {"content-type": "video/mp4", "upsert": "true"},
+        )
+    except Exception as e:
+        if "Bucket not found" in str(e) or "not found" in str(e).lower():
+            raise RuntimeError(
+                f"O bucket '{bucket}' não existe no Supabase Storage. "
+                f"Vá em Storage > New bucket, crie um bucket público chamado exatamente '{bucket}', "
+                f"e tente de novo."
+            ) from e
+        raise
     public_url = supabase_client.storage.from_(bucket).get_public_url(dest_filename)
     return public_url
 
@@ -452,7 +494,7 @@ if st.session_state["user"] is None:
         login_email = st.text_input(t("email_label"), key="login_email")
         login_password = st.text_input(t("password_label"), type="password", key="login_password")
 
-        if st.button(t("login_button")):
+        if st.button(t("login_button"), type="primary"):
             if not login_email or not login_password:
                 st.warning(t("fill_all_fields"))
             elif supabase:
@@ -473,7 +515,7 @@ if st.session_state["user"] is None:
         signup_email = st.text_input(t("email_label"), key="signup_email")
         signup_password = st.text_input(t("password_label"), type="password", key="signup_password")
 
-        if st.button(t("signup_button")):
+        if st.button(t("signup_button"), type="primary"):
             if not signup_email or not signup_password:
                 st.warning(t("fill_all_fields"))
             elif supabase:
@@ -543,6 +585,7 @@ with col2:
     display_handle = st.text_input(t("display_handle_label"), placeholder=t("display_handle_placeholder"), key="tpl_handle")
 
 caption = st.text_input(t("caption_input_label"), placeholder=t("caption_input_placeholder"), key="tpl_caption")
+bg_color_hex = st.color_picker(t("bg_color_label"), value="#FFFFFF", key="tpl_bg_color")
 
 template_name = display_name.strip() if display_name.strip() else t("default_display_name")
 template_handle = display_handle.strip().replace("@", "") if display_handle.strip() else t("default_display_handle")
@@ -553,6 +596,7 @@ bg_path, box_x, box_y, box_w, box_h = build_background_canvas(
     template_handle,
     verified,
     caption.strip() if caption else "",
+    bg_hex=bg_color_hex,
 )
 
 st.subheader(t("template_preview_subheader"))
@@ -580,7 +624,7 @@ with st.form("downloader_form"):
         [t("order_by_recent"), t("order_by_viral")],
         key="ordenar_por_input",
     )
-    submit_button = st.form_submit_button(t("fetch_button"))
+    submit_button = st.form_submit_button(t("fetch_button"), type="primary")
 
 if submit_button:
     if not username.strip():
@@ -713,7 +757,7 @@ current_user_id = st.session_state["user"].id
 with st.expander(t("connect_account_expander")):
     st.caption(t("connect_account_caption"))
     novo_token = st.text_input(t("token_input_label"), type="password", key="novo_ig_token")
-    if st.button(t("connect_account_button"), key="conectar_ig_button"):
+    if st.button(t("connect_account_button"), key="conectar_ig_button", type="primary"):
         if not novo_token.strip():
             st.warning(t("paste_token_warning"))
         else:
@@ -841,6 +885,17 @@ with tab_manage:
     ig_caption = st.text_area(t("reel_caption_label"), key="ig_caption_input")
     schedule_mode = st.radio(t("when_to_publish_label"), [t("publish_now_option"), t("schedule_later_option")], key="ig_schedule_mode")
 
+    # Guarda os bytes do vídeo assim que ele é enviado -- se o widget "esquecer"
+    # o arquivo numa próxima rodada (ex: ao trocar a conta selecionada acima),
+    # continuamos usando a cópia salva aqui em vez de perder o upload.
+    if schedule_video_file is not None:
+        st.session_state["ig_video_bytes_cache"] = schedule_video_file.getvalue()
+        st.session_state["ig_video_name_cache"] = schedule_video_file.name
+
+    video_bytes_to_use = st.session_state.get("ig_video_bytes_cache")
+    if schedule_video_file is None and video_bytes_to_use:
+        st.caption(t("previous_video_kept", name=st.session_state.get("ig_video_name_cache", "")))
+
     scheduled_datetime_iso = None
     if schedule_mode == t("schedule_later_option"):
         col_a, col_b = st.columns(2)
@@ -852,8 +907,8 @@ with tab_manage:
         scheduled_datetime_iso = scheduled_dt.isoformat()
         st.caption(t("jitter_caption"))
 
-    if st.button(t("confirm_button"), key="ig_confirm_button"):
-        if schedule_video_file is None:
+    if st.button(t("confirm_button"), key="ig_confirm_button", type="primary"):
+        if not video_bytes_to_use:
             st.warning(t("upload_video_warning"))
         elif not supabase:
             st.error(t("supabase_unavailable_error"))
@@ -862,7 +917,7 @@ with tab_manage:
                 with st.spinner(t("uploading_spinner")):
                     dest_filename = f"reel_{int(time.time())}.mp4"
                     public_video_url = upload_video_bytes_to_storage(
-                        supabase, schedule_video_file.getvalue(), dest_filename
+                        supabase, video_bytes_to_use, dest_filename
                     )
 
                 if schedule_mode == t("publish_now_option"):
@@ -873,12 +928,14 @@ with tab_manage:
                     except Exception:
                         pass  # publicação já deu certo, falha ao limpar não é crítica
                     st.success(t("published_success", media_id=media_id))
+                    st.session_state.pop("ig_video_bytes_cache", None)
                 else:
                     create_scheduled_post(
                         supabase, current_user_id, ig_user_id, IG_ACCESS_TOKEN, public_video_url, ig_caption,
                         scheduled_datetime_iso, storage_path=dest_filename,
                     )
                     st.success(t("scheduled_success", datetime=scheduled_dt.strftime('%d/%m/%Y %H:%M')))
+                    st.session_state.pop("ig_video_bytes_cache", None)
 
             except Exception as publish_err:
                 st.error(t("publish_schedule_error", error=publish_err))
@@ -943,7 +1000,7 @@ with tab_manage:
     )
     dias_semana_numeros = {dias_semana_opcoes[d] for d in dias_semana_labels}
 
-    if st.button(t("generate_bulk_button"), key="bulk_gerar_button"):
+    if st.button(t("generate_bulk_button"), key="bulk_gerar_button", type="primary"):
         if not videos_para_agendar:
             st.warning(t("no_videos_available_warning"))
         elif not dias_semana_numeros:
