@@ -11,6 +11,7 @@ import textwrap
 import time
 import random
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from supabase import create_client, ClientOptions
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 from ig_publisher import (
@@ -324,11 +325,18 @@ def upload_video_bytes_to_storage(supabase_client, file_bytes, dest_filename, bu
             {"content-type": "video/mp4", "upsert": "true"},
         )
     except Exception as e:
-        if "Bucket not found" in str(e) or "not found" in str(e).lower():
+        error_str = str(e)
+        if "Bucket not found" in error_str or "not found" in error_str.lower():
             raise RuntimeError(
                 f"O bucket '{bucket}' não existe no Supabase Storage. "
                 f"Vá em Storage > New bucket, crie um bucket público chamado exatamente '{bucket}', "
                 f"e tente de novo."
+            ) from e
+        if "row-level security" in error_str.lower() or "unauthorized" in error_str.lower():
+            raise RuntimeError(
+                f"O bucket '{bucket}' existe, mas está faltando permissão de upload (RLS). "
+                f"No Supabase, vá em SQL Editor e rode a policy de upload/delete pro bucket "
+                f"'{bucket}' (veja as instruções que o Claude te deu)."
             ) from e
         raise
     public_url = supabase_client.storage.from_(bucket).get_public_url(dest_filename)
@@ -417,6 +425,37 @@ def update_scheduled_post_status(supabase_client, post_id, status, media_id=None
     supabase_client.table("scheduled_posts").update(update_data).eq("id", post_id).execute()
 
 
+def update_scheduled_post_time(supabase_client, post_id, new_datetime_iso):
+    supabase_client.table("scheduled_posts").update({"scheduled_time": new_datetime_iso}).eq("id", post_id).execute()
+
+
+def delete_scheduled_post(supabase_client, post_id, storage_path=None, bucket=IG_STORAGE_BUCKET):
+    if storage_path:
+        try:
+            supabase_client.storage.from_(bucket).remove([storage_path])
+        except Exception:
+            pass  # se o arquivo já não existir, não é motivo pra travar o cancelamento
+    supabase_client.table("scheduled_posts").delete().eq("id", post_id).execute()
+
+
+def local_to_utc_naive(dt_naive, tz_name):
+    """
+    Recebe um datetime "ingênuo" (sem fuso, exatamente o que a pessoa digitou
+    na tela, no fuso dela) e devolve o equivalente em UTC, também sem fuso
+    (pra bater exatamente com o formato salvo no banco e o que o cron compara).
+    Usa zoneinfo (não um offset fixo) pra lidar certo com horário de verão.
+    """
+    localized = dt_naive.replace(tzinfo=ZoneInfo(tz_name))
+    utc_dt = localized.astimezone(timezone.utc)
+    return utc_dt.replace(tzinfo=None)
+
+
+def utc_naive_to_local(dt_naive_utc, tz_name):
+    """Caminho inverso -- usado só pra exibir os horários salvos na tela."""
+    aware_utc = dt_naive_utc.replace(tzinfo=timezone.utc)
+    return aware_utc.astimezone(ZoneInfo(tz_name)).replace(tzinfo=None)
+
+
 def aplicar_jitter(dt, minutos=10):
     """
     Aplica uma variação aleatória de +/- 'minutos' ao horário desejado, pra
@@ -427,12 +466,12 @@ def aplicar_jitter(dt, minutos=10):
     return dt + timedelta(seconds=offset_segundos)
 
 
-def gerar_horarios_em_massa(data_inicio, dias_semana_selecionados, horarios_por_dia, quantidade_videos, jitter_minutos=10):
+def gerar_horarios_em_massa(data_inicio, dias_semana_selecionados, horarios_por_dia, quantidade_videos, tz_name, jitter_minutos=10):
     """
-    Gera uma lista de datetimes para distribuir 'quantidade_videos' vídeos,
-    publicando 'len(horarios_por_dia)' vídeos por dia, só nos dias da semana
-    selecionados (0=Segunda ... 6=Domingo), a partir de 'data_inicio'.
-    Cada horário já sai com uma variação aleatória aplicada (jitter).
+    Gera uma lista de datetimes (já em UTC, sem fuso) para distribuir
+    'quantidade_videos' vídeos, publicando 'len(horarios_por_dia)' vídeos por
+    dia, só nos dias da semana selecionados (0=Segunda ... 6=Domingo), a
+    partir de 'data_inicio'. Cada horário já sai com jitter aplicado.
     """
     resultado = []
     dia_atual = data_inicio
@@ -444,8 +483,9 @@ def gerar_horarios_em_massa(data_inicio, dias_semana_selecionados, horarios_por_
             for horario in horarios_por_dia:
                 if len(resultado) >= quantidade_videos:
                     break
-                horario_base = datetime.combine(dia_atual, horario)
-                resultado.append(aplicar_jitter(horario_base, jitter_minutos))
+                horario_base_local = datetime.combine(dia_atual, horario)
+                horario_base_utc = local_to_utc_naive(horario_base_local, tz_name)
+                resultado.append(aplicar_jitter(horario_base_utc, jitter_minutos))
         dia_atual += timedelta(days=1)
         dias_verificados += 1
 
@@ -753,6 +793,15 @@ if not IG_SCHEDULING_ENABLED:
 
 current_user_id = st.session_state["user"].id
 
+# --- Fuso horário -- usado pra converter os horários digitados pra UTC antes
+# de salvar (o cron compara tudo em UTC; sem isso, "quando publicar" fica errado)
+common_timezones = [
+    "Europe/London", "Europe/Lisbon", "Europe/Madrid", "Europe/Berlin",
+    "America/Sao_Paulo", "America/New_York", "America/Los_Angeles",
+    "Asia/Tokyo", "Asia/Dubai", "UTC",
+]
+selected_tz = st.selectbox(t("timezone_label"), options=common_timezones, index=0, key="selected_timezone")
+
 # --- Conectar uma conta do Instagram a ESTE login ---
 with st.expander(t("connect_account_expander")):
     st.caption(t("connect_account_caption"))
@@ -903,7 +952,9 @@ with tab_manage:
             schedule_date = st.date_input(t("date_label"), key="ig_schedule_date")
         with col_b:
             schedule_time_input = st.time_input(t("time_label"), key="ig_schedule_time")
-        scheduled_dt = aplicar_jitter(datetime.combine(schedule_date, schedule_time_input))
+        scheduled_dt_local = datetime.combine(schedule_date, schedule_time_input)
+        scheduled_dt_utc = local_to_utc_naive(scheduled_dt_local, selected_tz)
+        scheduled_dt = aplicar_jitter(scheduled_dt_utc)
         scheduled_datetime_iso = scheduled_dt.isoformat()
         st.caption(t("jitter_caption"))
 
@@ -934,7 +985,8 @@ with tab_manage:
                         supabase, current_user_id, ig_user_id, IG_ACCESS_TOKEN, public_video_url, ig_caption,
                         scheduled_datetime_iso, storage_path=dest_filename,
                     )
-                    st.success(t("scheduled_success", datetime=scheduled_dt.strftime('%d/%m/%Y %H:%M')))
+                    scheduled_dt_display = utc_naive_to_local(scheduled_dt, selected_tz)
+                    st.success(t("scheduled_success", datetime=scheduled_dt_display.strftime('%d/%m/%Y %H:%M')))
                     st.session_state.pop("ig_video_bytes_cache", None)
 
             except Exception as publish_err:
@@ -1010,7 +1062,7 @@ with tab_manage:
         else:
             try:
                 horarios_datas = gerar_horarios_em_massa(
-                    data_inicio, dias_semana_numeros, horarios_selecionados, len(videos_para_agendar)
+                    data_inicio, dias_semana_numeros, horarios_selecionados, len(videos_para_agendar), selected_tz
                 )
 
                 bulk_progress = st.progress(0)
@@ -1031,9 +1083,12 @@ with tab_manage:
                 st.success(t(
                     "bulk_success",
                     count=criados,
-                    first=horarios_datas[0].strftime('%d/%m/%Y %H:%M'),
-                    last=horarios_datas[-1].strftime('%d/%m/%Y %H:%M'),
+                    first=utc_naive_to_local(horarios_datas[0], selected_tz).strftime('%d/%m/%Y %H:%M'),
+                    last=utc_naive_to_local(horarios_datas[-1], selected_tz).strftime('%d/%m/%Y %H:%M'),
                 ))
+                # Evita que os mesmos vídeos sejam usados de novo por engano
+                # numa próxima geração (era uma causa provável de duplicação).
+                st.session_state["generated_videos"] = []
                 st.rerun()
             except Exception as bulk_err:
                 st.error(t("bulk_error", error=bulk_err))
@@ -1044,11 +1099,60 @@ with tab_manage:
         if not pending_posts:
             st.caption(t("no_pending_caption"))
         else:
+            # Agrupa por dia LOCAL (não pelo UTC cru salvo no banco) -- mais
+            # fácil de notar duplicatas/erros do que uma lista corrida.
+            posts_by_day = {}
             for post in pending_posts:
-                st.write(t("pending_item_label", time=post['scheduled_time'], caption=post.get('caption', '')[:60] or t("no_caption_placeholder")))
+                try:
+                    utc_dt = datetime.fromisoformat(post["scheduled_time"])
+                except Exception:
+                    utc_dt = datetime.now(timezone.utc).replace(tzinfo=None)
+                local_dt = utc_naive_to_local(utc_dt, selected_tz)
+                day_key = local_dt.date().isoformat()
+                posts_by_day.setdefault(day_key, []).append((post, local_dt))
+
+            for day_key in sorted(posts_by_day.keys()):
+                day_posts = posts_by_day[day_key]
+                try:
+                    day_label = datetime.strptime(day_key, "%Y-%m-%d").strftime("%d/%m/%Y")
+                except Exception:
+                    day_label = day_key
+
+                with st.expander(t("calendar_day_header", date=day_label, count=len(day_posts)), expanded=True):
+                    for post, local_dt in day_posts:
+                        post_time_str = local_dt.strftime("%H:%M")
+                        st.markdown(f"**🕒 {post_time_str}** — {(post.get('caption') or '')[:60] or t('no_caption_placeholder')}")
+
+                        preview_col, edit_col = st.columns([1, 1])
+                        with preview_col:
+                            if post.get("video_url"):
+                                st.video(post["video_url"])
+
+                        with edit_col:
+                            new_date = st.date_input(
+                                t("date_label"), value=local_dt.date(), key=f"edit_date_{post['id']}"
+                            )
+                            new_time = st.time_input(
+                                t("time_label"), value=local_dt.time(), key=f"edit_time_{post['id']}"
+                            )
+
+                            btn_col1, btn_col2 = st.columns(2)
+                            with btn_col1:
+                                if st.button(t("save_button"), key=f"save_{post['id']}"):
+                                    new_dt_utc = local_to_utc_naive(datetime.combine(new_date, new_time), selected_tz)
+                                    update_scheduled_post_time(supabase, post["id"], new_dt_utc.isoformat())
+                                    st.success(t("time_updated_success"))
+                                    st.rerun()
+                            with btn_col2:
+                                if st.button(t("delete_button"), key=f"delete_{post['id']}"):
+                                    delete_scheduled_post(supabase, post["id"], storage_path=post.get("storage_path"))
+                                    st.success(t("post_deleted_success"))
+                                    st.rerun()
+
+                        st.markdown("---")
 
             if st.button(t("check_pending_button")):
-                now_iso = datetime.now().isoformat()
+                now_iso = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
                 published_count = 0
                 for post in pending_posts:
                     if post["scheduled_time"] <= now_iso:
