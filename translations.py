@@ -92,6 +92,7 @@ TRANSLATIONS = {
 
         # --- Step 3: Instagram scheduling ---
         "step3_header": "3️⃣ Schedule/Publish to Instagram (personal use)",
+        "timezone_label": "🌍 Your timezone (used to convert the times you enter):",
         "scheduling_disabled_warning": (
             "🔒 Automatic publishing/scheduling is **disabled for now** (to avoid the "
             "risk of an account block while this is tested carefully). All the code "
@@ -172,6 +173,11 @@ TRANSLATIONS = {
         "pending_subheader": "📋 Pending schedules (for the account you're logged in as)",
         "no_pending_caption": "No pending schedules.",
         "pending_item_label": "🕒 **{time}** — {caption}",
+        "calendar_day_header": "📅 {date} ({count} post(s))",
+        "save_button": "💾 Save",
+        "delete_button": "🗑️ Delete",
+        "time_updated_success": "Time updated!",
+        "post_deleted_success": "Schedule deleted.",
         "no_caption_placeholder": "(no caption)",
         "check_pending_button": "🔄 Check and publish schedules that are already due (manual backup, the cron does this automatically)",
         "auto_publish_error": "Error publishing schedule {id}: {error}",
@@ -262,6 +268,7 @@ TRANSLATIONS = {
 
         # --- Etapa 3: Agendamento no Instagram ---
         "step3_header": "3️⃣ Agendar/Publicar no Instagram (uso pessoal)",
+        "timezone_label": "🌍 Seu fuso horário (usado pra converter os horários que você digita):",
         "scheduling_disabled_warning": (
             "🔒 Publicação/agendamento automático está **desativado por enquanto** "
             "(pra evitar risco de bloqueio de conta enquanto isso é testado com calma). "
@@ -342,6 +349,11 @@ TRANSLATIONS = {
         "pending_subheader": "📋 Agendamentos pendentes (dessa conta que você está logado)",
         "no_pending_caption": "Nenhum agendamento pendente.",
         "pending_item_label": "🕒 **{time}** — {caption}",
+        "calendar_day_header": "📅 {date} ({count} post(s))",
+        "save_button": "💾 Salvar",
+        "delete_button": "🗑️ Apagar",
+        "time_updated_success": "Horário atualizado!",
+        "post_deleted_success": "Agendamento apagado.",
         "no_caption_placeholder": "(sem legenda)",
         "check_pending_button": "🔄 Verificar e publicar agendados que já venceram (backup manual, o cron faz isso sozinho)",
         "auto_publish_error": "Erro ao publicar agendamento {id}: {error}",
