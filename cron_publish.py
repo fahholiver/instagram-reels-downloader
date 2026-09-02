@@ -36,7 +36,11 @@ def main():
 
     supabase = create_client(supabase_url, supabase_key)
 
-    now_iso = datetime.now(timezone.utc).isoformat()
+    # Sem tzinfo de propósito -- a coluna é "timestamp" (sem fuso) e agora o
+    # app sempre salva em UTC "ingênuo". Comparar um valor com "+00:00" contra
+    # uma coluna sem fuso é justamente o que causava agendamentos "vencidos"
+    # que nunca eram detectados como vencidos.
+    now_iso = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
 
     pending = (
         supabase.table("scheduled_posts")
